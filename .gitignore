@@ -1,0 +1,13 @@
+.env
+.env.local
+.local/.env
+bin/
+coverage.out
+dist/
+tmp/
+vendor/
+*.log
+*.tmp
+*.test
+internal/store/sqlc/*.go
+!internal/store/sqlc/.keep

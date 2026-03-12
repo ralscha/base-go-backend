@@ -1,0 +1,25 @@
+services:
+  postgres:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_DB: base
+      POSTGRES_USER: base_user
+      POSTGRES_PASSWORD: base_password
+    ports:
+      - "5432:5432"
+    volumes:
+      - base_data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U base_user -d base"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  inbucket:
+    image: inbucket/inbucket:latest
+    ports:
+      - "2500:2500"
+      - "9000:9000"
+
+volumes:
+  base_data:
