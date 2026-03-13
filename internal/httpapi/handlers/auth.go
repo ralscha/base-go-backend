@@ -13,6 +13,7 @@ import (
 	"base/internal/auth"
 
 	"github.com/alexedwards/scs/v2"
+	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	ratelimit "github.com/ralscha/ratelimiter-pg"
 )
@@ -22,6 +23,7 @@ const deviceCookieName = "base_device"
 const (
 	passkeyRegistrationSessionKey = "passkey_registration_session"
 	passkeyLoginSessionKey        = "passkey_login_session" //nolint:gosec // session key name, not a credential
+	oauthSessionKey               = "oauth_flow_session"    //nolint:gosec // session key name, not a credential
 )
 
 type AuthHandler struct {
@@ -141,6 +143,56 @@ func (h AuthHandler) BeginPasskeyLogin(w http.ResponseWriter, r *http.Request) {
 
 	h.Sessions.Put(r.Context(), passkeyLoginSessionKey, string(sessionJSON))
 	writeJSON(w, http.StatusOK, map[string]any{"options": options})
+}
+
+func (h AuthHandler) StartOAuth(w http.ResponseWriter, r *http.Request) {
+	provider := chi.URLParam(r, "provider")
+	authorizationURL, sessionJSON, mode, err := h.Service.OAuthAuthorizationURL(r.Context(), provider, h.Sessions.GetInt64(r.Context(), "user_id"))
+	if err != nil {
+		handleAuthError(w, err)
+		return
+	}
+
+	h.Sessions.Put(r.Context(), oauthSessionKey, string(sessionJSON))
+	writeJSON(w, http.StatusOK, map[string]any{
+		"provider":          provider,
+		"mode":              mode,
+		"authorization_url": authorizationURL,
+	})
+}
+
+func (h AuthHandler) CompleteOAuth(w http.ResponseWriter, r *http.Request) {
+	sessionJSON := []byte(h.Sessions.GetString(r.Context(), oauthSessionKey))
+	h.Sessions.Remove(r.Context(), oauthSessionKey)
+
+	result, err := h.Service.CompleteOAuthAuthentication(
+		r.Context(),
+		chi.URLParam(r, "provider"),
+		sessionJSON,
+		strings.TrimSpace(r.URL.Query().Get("state")),
+		strings.TrimSpace(r.URL.Query().Get("code")),
+		h.Sessions.GetInt64(r.Context(), "user_id"),
+	)
+	if err != nil {
+		handleAuthError(w, err)
+		return
+	}
+
+	if result.Mode == "login" {
+		deviceID := ensureDeviceID(w, r, h.Secure)
+		if err := h.completeLogin(r.Context(), result.Principal, deviceID); err != nil {
+			writeError(w, http.StatusInternalServerError, "session_error", err.Error())
+			return
+		}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"user":     result.Principal,
+		"provider": result.Provider,
+		"mode":     result.Mode,
+		"created":  result.Created,
+		"linked":   result.Linked,
+	})
 }
 
 func (h AuthHandler) FinishPasskeyLogin(w http.ResponseWriter, r *http.Request) {
@@ -328,8 +380,18 @@ func handleAuthError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusUnauthorized, "invalid_totp", err.Error())
 	case errors.Is(err, auth.ErrPasskeyCeremony):
 		writeError(w, http.StatusBadRequest, "passkey_ceremony_missing", err.Error())
+	case errors.Is(err, auth.ErrOAuthProvider):
+		writeError(w, http.StatusBadRequest, "oauth_provider_invalid", err.Error())
+	case errors.Is(err, auth.ErrOAuthState):
+		writeError(w, http.StatusBadRequest, "oauth_state_invalid", err.Error())
+	case errors.Is(err, auth.ErrOAuthConflict):
+		writeError(w, http.StatusConflict, "oauth_conflict", err.Error())
+	case errors.Is(err, auth.ErrOAuthProfile):
+		writeError(w, http.StatusBadRequest, "oauth_profile_invalid", err.Error())
 	case errors.Is(err, auth.ErrWeakPassword):
 		writeError(w, http.StatusBadRequest, "weak_password", err.Error())
+	case errors.Is(err, auth.ErrRequestFailed):
+		writeError(w, http.StatusBadRequest, "request_failed", err.Error())
 	default:
 		writeError(w, http.StatusInternalServerError, "internal_error", "an unexpected error occurred")
 	}

@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"strings"
 
+	"base/internal/store/dbtype"
 	"base/internal/store/sqlc"
 
 	"github.com/go-webauthn/webauthn/protocol"
@@ -97,10 +98,6 @@ func (s *Service) FinishPasskeyLogin(ctx context.Context, sessionJSON, credentia
 	if err := s.validateSecondFactor(ctx, user.user.ID, totpCode, recoveryCode); err != nil {
 		return SessionPrincipal{}, err
 	}
-
-	if err := s.recordLoginAttempt(ctx, user.user.ID, user.user.Username, true, ipAddress, userAgent); err != nil {
-		return SessionPrincipal{}, err
-	}
 	if err := s.queries.UpdateUserLastLogin(ctx, user.user.ID); err != nil {
 		return SessionPrincipal{}, err
 	}
@@ -108,17 +105,7 @@ func (s *Service) FinishPasskeyLogin(ctx context.Context, sessionJSON, credentia
 		return SessionPrincipal{}, err
 	}
 
-	roles, err := s.queries.ListUserRoleNames(ctx, user.user.ID)
-	if err != nil {
-		return SessionPrincipal{}, err
-	}
-
-	updatedUser, err := s.queries.GetUserByID(ctx, user.user.ID)
-	if err != nil {
-		return SessionPrincipal{}, err
-	}
-
-	return s.principalWithFactors(ctx, updatedUser, roles)
+	return s.completeUserAuthentication(ctx, s.queries, user.user.ID, true)
 }
 
 type passkeyUser struct {
@@ -239,7 +226,7 @@ func (s *Service) persistPasskeyCredential(ctx context.Context, userID int64, cr
 		CloneWarning:        credential.Authenticator.CloneWarning,
 		Transports:          transports,
 		Name:                sql.NullString{String: name, Valid: true},
-		CredentialData:      credentialData,
+		CredentialData:      dbtype.RawMessage(credentialData),
 	})
 
 	return err
@@ -273,14 +260,14 @@ func (s *Service) updatePasskeyCredential(ctx context.Context, credential *wa.Cr
 		SignCount:           int64(credential.Authenticator.SignCount),
 		CloneWarning:        credential.Authenticator.CloneWarning,
 		Transports:          transports,
-		CredentialData:      credentialData,
+		CredentialData:      dbtype.RawMessage(credentialData),
 	})
 }
 
 func credentialFromRow(row sqlc.PasskeyCredential) wa.Credential {
 	if len(row.CredentialData) > 0 && string(row.CredentialData) != "{}" {
 		var credential wa.Credential
-		if err := json.Unmarshal(row.CredentialData, &credential); err == nil {
+		if err := json.Unmarshal([]byte(row.CredentialData), &credential); err == nil {
 			return credential
 		}
 	}

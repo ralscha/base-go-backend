@@ -17,6 +17,7 @@ type Config struct {
 	Database  DatabaseConfig  `koanf:"database"`
 	Session   SessionConfig   `koanf:"session"`
 	Security  SecurityConfig  `koanf:"security"`
+	OAuth     OAuthConfig     `koanf:"oauth"`
 	WebAuthn  WebAuthnConfig  `koanf:"webauthn"`
 	Mailer    MailerConfig    `koanf:"mailer"`
 	Scheduler SchedulerConfig `koanf:"scheduler"`
@@ -69,6 +70,29 @@ type SecurityConfig struct {
 	TOTPIssuer             string        `koanf:"totp_issuer"`
 }
 
+type OAuthConfig struct {
+	StateTTL          time.Duration                  `koanf:"state_ttl"`
+	StateBytes        int                            `koanf:"state_bytes"`
+	PKCEVerifierBytes int                            `koanf:"pkce_verifier_bytes"`
+	Providers         map[string]OAuthProviderConfig `koanf:"providers"`
+}
+
+type OAuthProviderConfig struct {
+	Enabled            bool     `koanf:"enabled"`
+	ClientID           string   `koanf:"client_id"`
+	ClientSecret       string   `koanf:"client_secret"`
+	AuthURL            string   `koanf:"auth_url"`
+	TokenURL           string   `koanf:"token_url"`
+	UserInfoURL        string   `koanf:"user_info_url"`
+	RedirectURL        string   `koanf:"redirect_url"`
+	Scopes             []string `koanf:"scopes"`
+	SubjectField       string   `koanf:"subject_field"`
+	EmailField         string   `koanf:"email_field"`
+	EmailVerifiedField string   `koanf:"email_verified_field"`
+	UsernameField      string   `koanf:"username_field"`
+	NameField          string   `koanf:"name_field"`
+}
+
 type WebAuthnConfig struct {
 	RPID          string   `koanf:"rp_id"`
 	RPDisplayName string   `koanf:"rp_display_name"`
@@ -112,6 +136,26 @@ func Load() (Config, error) {
 
 	if cfg.App.Name == "" {
 		cfg.App.Name = "base"
+	}
+	if cfg.OAuth.StateTTL <= 0 {
+		cfg.OAuth.StateTTL = 10 * time.Minute
+	}
+	if cfg.OAuth.StateBytes <= 0 {
+		cfg.OAuth.StateBytes = 32
+	}
+	if cfg.OAuth.PKCEVerifierBytes <= 0 {
+		cfg.OAuth.PKCEVerifierBytes = 32
+	}
+	if cfg.OAuth.Providers == nil {
+		cfg.OAuth.Providers = map[string]OAuthProviderConfig{}
+	}
+	for name, provider := range cfg.OAuth.Providers {
+		if !provider.Enabled {
+			continue
+		}
+		if provider.ClientID == "" || provider.ClientSecret == "" || provider.AuthURL == "" || provider.TokenURL == "" || provider.UserInfoURL == "" || provider.RedirectURL == "" {
+			return Config{}, fmt.Errorf("oauth.providers.%s must set client_id, client_secret, auth_url, token_url, user_info_url, and redirect_url when enabled", name)
+		}
 	}
 
 	const defaultEncryptionKey = "0123456789abcdef0123456789abcdef"

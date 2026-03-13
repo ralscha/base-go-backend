@@ -40,12 +40,36 @@ security:
   inactivity_disable_after: 8760h
   totp_issuer: base
 
+oauth:
+  state_ttl: 10m
+  state_bytes: 32
+  pkce_verifier_bytes: 32
+  providers:
+    google:
+      enabled: false
+      client_id: ""
+      client_secret: ""
+      auth_url: https://accounts.google.com/o/oauth2/v2/auth
+      token_url: https://oauth2.googleapis.com/token
+      user_info_url: https://openidconnect.googleapis.com/v1/userinfo
+      redirect_url: http://localhost:8080/api/v1/auth/oauth/google/callback
+      scopes:
+        - openid
+        - email
+        - profile
+      subject_field: sub
+      email_field: email
+      email_verified_field: email_verified
+      username_field: preferred_username
+      name_field: name
+
 webauthn:
   rp_id: localhost
   rp_display_name: Base
   rp_origins:
     - http://localhost:3000
     - http://localhost:8080
+
 
 mailer:
   enabled: true

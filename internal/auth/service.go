@@ -7,10 +7,12 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/http"
 	"strings"
 	"time"
 
 	"base/internal/config"
+	"base/internal/store/dbtype"
 	"base/internal/store/sqlc"
 
 	wa "github.com/go-webauthn/webauthn/webauthn"
@@ -26,10 +28,15 @@ var (
 	ErrAccountLocked      = errors.New("account is locked")
 	ErrAccountDisabled    = errors.New("account is disabled")
 	ErrEmailUnverified    = errors.New("email verification required")
+	ErrRequestFailed      = errors.New("request failed")
 	ErrTOTPRequired       = errors.New("two-factor authentication required")
 	ErrInvalidTOTP        = errors.New("invalid two-factor code")
 	ErrPasskeyCeremony    = errors.New("passkey ceremony not initialized")
 	ErrUnauthorized       = errors.New("authentication required")
+	ErrOAuthProvider      = errors.New("oauth provider is not configured")
+	ErrOAuthState         = errors.New("oauth state is invalid or expired")
+	ErrOAuthConflict      = errors.New("oauth account is already linked to another user")
+	ErrOAuthProfile       = errors.New("oauth provider profile is incomplete")
 )
 
 type Service struct {
@@ -37,6 +44,7 @@ type Service struct {
 	queries  *sqlc.Queries
 	limiter  *ratelimit.RateLimiter
 	webAuthn *wa.WebAuthn
+	oauth    map[string]OAuthProviderClient
 	cfg      config.Config
 }
 
@@ -93,11 +101,17 @@ func NewService(ctx context.Context, db *sql.DB, pgxPool *pgxpool.Pool, cfg conf
 		return nil, fmt.Errorf("init webauthn: %w", err)
 	}
 
+	oauthProviders, err := newOAuthProviderClients(cfg.OAuth, http.DefaultClient)
+	if err != nil {
+		return nil, fmt.Errorf("init oauth providers: %w", err)
+	}
+
 	return &Service{
 		db:       db,
 		queries:  sqlc.New(db),
 		limiter:  limiter,
 		webAuthn: webAuthn,
+		oauth:    oauthProviders,
 		cfg:      cfg,
 	}, nil
 }
@@ -168,7 +182,7 @@ func (s *Service) Register(ctx context.Context, input RegisterInput) (SessionPri
 		Template:    "verify-email",
 		Recipient:   user.Email,
 		Subject:     "Verify your account",
-		Payload:     payload,
+		Payload:     dbtype.RawMessage(payload),
 		AvailableAt: time.Now().UTC(),
 	}); err != nil {
 		return SessionPrincipal{}, err
@@ -198,7 +212,6 @@ func (s *Service) LoginWithPassword(ctx context.Context, input LoginInput) (Sess
 	user, err := s.lookupUser(ctx, identifier)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			_ = s.recordLoginAttempt(ctx, 0, identifier, false, input.IPAddress, input.UserAgent)
 			return SessionPrincipal{}, ErrInvalidCredentials
 		}
 		return SessionPrincipal{}, err
@@ -224,36 +237,20 @@ func (s *Service) LoginWithPassword(ctx context.Context, input LoginInput) (Sess
 		return SessionPrincipal{}, err
 	}
 	if !match {
-		if err := s.handleFailedLogin(ctx, user, identifier, input.IPAddress, input.UserAgent); err != nil {
+		if err := s.handleFailedLogin(ctx, user); err != nil {
 			return SessionPrincipal{}, err
 		}
 		return SessionPrincipal{}, ErrInvalidCredentials
 	}
 
 	if err := s.validateSecondFactor(ctx, user.ID, input.TOTPCode, input.RecoveryCode); err != nil {
-		if err2 := s.handleFailedLogin(ctx, user, identifier, input.IPAddress, input.UserAgent); err2 != nil {
+		if err2 := s.handleFailedLogin(ctx, user); err2 != nil {
 			return SessionPrincipal{}, err2
 		}
 		return SessionPrincipal{}, err
 	}
 
-	if err := s.recordLoginAttempt(ctx, user.ID, identifier, true, input.IPAddress, input.UserAgent); err != nil {
-		return SessionPrincipal{}, err
-	}
-	if err := s.queries.UpdateUserLastLogin(ctx, user.ID); err != nil {
-		return SessionPrincipal{}, err
-	}
-
-	roles, err := s.queries.ListUserRoleNames(ctx, user.ID)
-	if err != nil {
-		return SessionPrincipal{}, err
-	}
-	updatedUser, err := s.queries.GetUserByID(ctx, user.ID)
-	if err != nil {
-		return SessionPrincipal{}, err
-	}
-
-	return principalFromUser(updatedUser, roles), nil
+	return s.completeUserAuthentication(ctx, s.queries, user.ID, true)
 }
 
 func (s *Service) BeginTOTPSetup(ctx context.Context, userID int64) (TOTPSetup, error) {
@@ -422,7 +419,7 @@ func (s *Service) RequestPasswordReset(ctx context.Context, email string) error 
 		Template:    "password-reset",
 		Recipient:   user.Email,
 		Subject:     "Reset your password",
-		Payload:     payload,
+		Payload:     dbtype.RawMessage(payload),
 		AvailableAt: time.Now().UTC(),
 	}); err != nil {
 		return err
@@ -472,7 +469,7 @@ func (s *Service) RequestAccountRecovery(ctx context.Context, email string) erro
 		Template:    "account-recovery",
 		Recipient:   user.Email,
 		Subject:     "Recover your account",
-		Payload:     payload,
+		Payload:     dbtype.RawMessage(payload),
 		AvailableAt: time.Now().UTC(),
 	}); err != nil {
 		return err
@@ -492,6 +489,9 @@ func (s *Service) RecoverAccount(ctx context.Context, token string, password str
 		Kind:      sqlc.TokenKindAccountRecovery,
 	})
 	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrRequestFailed
+		}
 		return err
 	}
 
@@ -532,6 +532,9 @@ func (s *Service) ResetPassword(ctx context.Context, token string, password stri
 		Kind:      sqlc.TokenKindPasswordReset,
 	})
 	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrRequestFailed
+		}
 		return err
 	}
 
@@ -575,6 +578,86 @@ func (s *Service) CurrentUser(ctx context.Context, userID int64) (SessionPrincip
 		return SessionPrincipal{}, err
 	}
 	return s.principalWithFactors(ctx, user, roles)
+}
+
+func (s *Service) OAuthAuthorizationURL(ctx context.Context, provider string, currentUserID int64) (string, []byte, string, error) {
+	client, normalizedProvider, err := s.oauthProvider(provider)
+	if err != nil {
+		return "", nil, "", err
+	}
+
+	state, err := randomToken(s.cfg.OAuth.StateBytes)
+	if err != nil {
+		return "", nil, "", err
+	}
+	verifier, err := randomToken(s.cfg.OAuth.PKCEVerifierBytes)
+	if err != nil {
+		return "", nil, "", err
+	}
+
+	sessionJSON, err := encodeOAuthFlow(oauthFlowState{
+		Provider:     normalizedProvider,
+		State:        state,
+		CodeVerifier: verifier,
+		StartedAt:    time.Now().UTC(),
+		LinkUserID:   currentUserID,
+	})
+	if err != nil {
+		return "", nil, "", err
+	}
+
+	return client.AuthorizationURL(state, pkceCodeChallenge(verifier)), sessionJSON, modeForUserID(currentUserID), nil
+}
+
+func (s *Service) CompleteOAuthAuthentication(ctx context.Context, provider string, sessionJSON []byte, state string, code string, currentUserID int64) (OAuthAuthenticationResult, error) {
+	flowState, err := decodeOAuthFlow(sessionJSON)
+	if err != nil {
+		return OAuthAuthenticationResult{}, err
+	}
+	if time.Since(flowState.StartedAt) > s.cfg.OAuth.StateTTL {
+		return OAuthAuthenticationResult{}, ErrOAuthState
+	}
+
+	client, normalizedProvider, err := s.oauthProvider(provider)
+	if err != nil {
+		return OAuthAuthenticationResult{}, err
+	}
+	if flowState.Provider != normalizedProvider || subtleCompare(flowState.State, strings.TrimSpace(state)) == false || strings.TrimSpace(code) == "" {
+		return OAuthAuthenticationResult{}, ErrOAuthState
+	}
+	if flowState.LinkUserID != 0 && flowState.LinkUserID != currentUserID {
+		return OAuthAuthenticationResult{}, ErrOAuthState
+	}
+
+	tokens, err := client.ExchangeCode(ctx, strings.TrimSpace(code), flowState.CodeVerifier)
+	if err != nil {
+		return OAuthAuthenticationResult{}, fmt.Errorf("exchange oauth code: %w", err)
+	}
+	profile, err := client.FetchProfile(ctx, tokens.AccessToken)
+	if err != nil {
+		return OAuthAuthenticationResult{}, fmt.Errorf("fetch oauth profile: %w", err)
+	}
+	if strings.TrimSpace(profile.Subject) == "" || strings.TrimSpace(profile.Email) == "" {
+		return OAuthAuthenticationResult{}, ErrOAuthProfile
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return OAuthAuthenticationResult{}, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	q := s.queries.WithTx(tx)
+	principal, result, err := s.completeOAuthFlow(ctx, q, normalizedProvider, flowState, profile, tokens)
+	if err != nil {
+		return OAuthAuthenticationResult{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return OAuthAuthenticationResult{}, err
+	}
+
+	result.Principal = principal
+	return result, nil
 }
 
 func (s *Service) RecordUserSession(ctx context.Context, userID int64, deviceID, token string, expiry time.Time) error {
@@ -630,23 +713,13 @@ func (s *Service) enforceRateLimit(ctx context.Context, identifier, ip string) e
 	return nil
 }
 
-func (s *Service) handleFailedLogin(ctx context.Context, user sqlc.User, identifier, ipAddress, userAgent string) error {
-	if err := s.recordLoginAttempt(ctx, user.ID, identifier, false, ipAddress, userAgent); err != nil {
-		return err
-	}
-	if err := s.queries.IncrementFailedLogin(ctx, user.ID); err != nil {
-		return err
-	}
-
-	count, err := s.queries.CountRecentFailedAttemptsByUser(ctx, sqlc.CountRecentFailedAttemptsByUserParams{
-		UserID:    sql.NullInt64{Int64: user.ID, Valid: true},
-		CreatedAt: time.Now().UTC().Add(-s.cfg.Security.FailedLoginWindow),
-	})
+func (s *Service) handleFailedLogin(ctx context.Context, user sqlc.User) error {
+	updatedUser, err := s.queries.IncrementFailedLogin(ctx, user.ID)
 	if err != nil {
 		return err
 	}
 
-	if count >= int64(s.cfg.Security.FailedLoginThreshold) {
+	if updatedUser.FailedLoginCount >= int32(s.cfg.Security.FailedLoginThreshold) {
 		return s.queries.LockUserUntil(ctx, sqlc.LockUserUntilParams{
 			ID:             user.ID,
 			LockedUntil:    sql.NullTime{Time: time.Now().UTC().Add(100 * 365 * 24 * time.Hour), Valid: true},
@@ -657,19 +730,32 @@ func (s *Service) handleFailedLogin(ctx context.Context, user sqlc.User, identif
 	return nil
 }
 
-func (s *Service) recordLoginAttempt(ctx context.Context, userID int64, username string, success bool, ipAddress, userAgent string) error {
-	var nullableID sql.NullInt64
-	if userID > 0 {
-		nullableID = sql.NullInt64{Int64: userID, Valid: true}
+func (s *Service) oauthProvider(name string) (OAuthProviderClient, string, error) {
+	normalizedName := strings.ToLower(strings.TrimSpace(name))
+	provider, ok := s.oauth[normalizedName]
+	if !ok {
+		return nil, "", ErrOAuthProvider
 	}
-	_, err := s.queries.InsertLoginAttempt(ctx, sqlc.InsertLoginAttemptParams{
-		UserID:    nullableID,
-		Username:  username,
-		Success:   success,
-		IpAddress: inetValue(ipAddress),
-		UserAgent: nullString(userAgent),
-	})
-	return err
+	return provider, normalizedName, nil
+}
+
+func (s *Service) completeUserAuthentication(ctx context.Context, queries *sqlc.Queries, userID int64, updateLastLogin bool) (SessionPrincipal, error) {
+	if updateLastLogin {
+		if err := queries.UpdateUserLastLogin(ctx, userID); err != nil {
+			return SessionPrincipal{}, err
+		}
+	}
+
+	roles, err := queries.ListUserRoleNames(ctx, userID)
+	if err != nil {
+		return SessionPrincipal{}, err
+	}
+	updatedUser, err := queries.GetUserByID(ctx, userID)
+	if err != nil {
+		return SessionPrincipal{}, err
+	}
+
+	return s.principalWithFactors(ctx, updatedUser, roles)
 }
 
 func principalFromUser(user sqlc.User, roles []string) SessionPrincipal {

@@ -113,16 +113,6 @@ CREATE TABLE IF NOT EXISTS user_roles (
     PRIMARY KEY (user_id, role_id)
 );
 
-CREATE TABLE IF NOT EXISTS login_attempts (
-    id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    user_id BIGINT REFERENCES users (id) ON DELETE SET NULL,
-    username TEXT NOT NULL,
-    success BOOLEAN NOT NULL,
-    ip_address INET,
-    user_agent TEXT,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
 CREATE TABLE IF NOT EXISTS email_outbox (
     id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     template TEXT NOT NULL,
@@ -153,14 +143,13 @@ CREATE INDEX IF NOT EXISTS idx_oauth_accounts_user_id ON oauth_accounts (user_id
 CREATE INDEX IF NOT EXISTS idx_user_sessions_user_device ON user_sessions (user_id, device_id) WHERE revoked_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_user_sessions_expiry ON user_sessions (expiry);
 CREATE INDEX IF NOT EXISTS idx_user_tokens_user_id ON user_tokens (user_id);
-CREATE INDEX IF NOT EXISTS idx_login_attempts_username_created_at ON login_attempts (username, created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_login_attempts_user_id_created_at ON login_attempts (user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_email_outbox_available_at ON email_outbox (available_at) WHERE sent_at IS NULL;
 
 INSERT INTO roles (name, description)
 VALUES ('admin', 'Full administrative access'), ('user', 'Default application user')
 ON CONFLICT (name) DO NOTHING;
 
+-- +goose StatementBegin
 CREATE OR REPLACE FUNCTION set_updated_at()
 RETURNS TRIGGER AS $$
 BEGIN
@@ -168,6 +157,7 @@ BEGIN
     RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;
+-- +goose StatementEnd
 
 CREATE TRIGGER trg_users_updated_at
     BEFORE UPDATE ON users
@@ -204,7 +194,6 @@ CREATE TRIGGER trg_scheduled_jobs_updated_at
 -- +goose Down
 DROP TABLE IF EXISTS scheduled_jobs;
 DROP TABLE IF EXISTS email_outbox;
-DROP TABLE IF EXISTS login_attempts;
 DROP TABLE IF EXISTS user_roles;
 DROP TABLE IF EXISTS roles;
 DROP TABLE IF EXISTS user_sessions;

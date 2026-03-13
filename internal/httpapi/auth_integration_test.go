@@ -8,8 +8,11 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/http/cookiejar"
 	"net/http/httptest"
+	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -89,7 +92,7 @@ func TestAccountRecoveryFlowReactivatesUserAndClearsTOTP(t *testing.T) {
 		Token string `json:"token"`
 		Email string `json:"email"`
 	}
-	if err := json.Unmarshal(emails[0].Payload, &emailPayload); err != nil {
+	if err := json.Unmarshal([]byte(emails[0].Payload), &emailPayload); err != nil {
 		t.Fatalf("json.Unmarshal(email payload) error = %v", err)
 	}
 	if emailPayload.Token == "" {
@@ -190,7 +193,7 @@ func TestAccountRecoveryTokenCannotBeReused(t *testing.T) {
 	var emailPayload struct {
 		Token string `json:"token"`
 	}
-	if err := json.Unmarshal(emails[0].Payload, &emailPayload); err != nil {
+	if err := json.Unmarshal([]byte(emails[0].Payload), &emailPayload); err != nil {
 		t.Fatalf("json.Unmarshal(email payload) error = %v", err)
 	}
 
@@ -272,7 +275,7 @@ func TestExpiredAccountRecoveryTokenIsRejected(t *testing.T) {
 	var emailPayload struct {
 		Token string `json:"token"`
 	}
-	if err := json.Unmarshal(emails[0].Payload, &emailPayload); err != nil {
+	if err := json.Unmarshal([]byte(emails[0].Payload), &emailPayload); err != nil {
 		t.Fatalf("json.Unmarshal(email payload) error = %v", err)
 	}
 
@@ -319,6 +322,522 @@ func TestExpiredAccountRecoveryTokenIsRejected(t *testing.T) {
 	}
 }
 
+func TestFailedPasswordLoginsUseUserCounterForLockout(t *testing.T) {
+	ctx := context.Background()
+	env := newIntegrationEnv(t, ctx)
+
+	user, err := env.queries.CreateUser(ctx, sqlc.CreateUserParams{Username: "lockout-user", Email: "lockout@example.com"})
+	if err != nil {
+		t.Fatalf("CreateUser() error = %v", err)
+	}
+
+	passwordHash, err := auth.HashPassword("CorrectPassword123")
+	if err != nil {
+		t.Fatalf("HashPassword() error = %v", err)
+	}
+	if _, err := env.queries.UpsertPasswordCredential(ctx, sqlc.UpsertPasswordCredentialParams{UserID: user.ID, PasswordHash: passwordHash}); err != nil {
+		t.Fatalf("UpsertPasswordCredential() error = %v", err)
+	}
+
+	if _, err := env.db.ExecContext(ctx, `
+		UPDATE users
+		SET email_verified_at = NOW()
+		WHERE id = $1
+	`, user.ID); err != nil {
+		t.Fatalf("verify user for setup: %v", err)
+	}
+
+	for attempt := 1; attempt <= 5; attempt++ {
+		_, err := env.authService.LoginWithPassword(ctx, auth.LoginInput{
+			Identifier: user.Email,
+			Password:   "WrongPassword123",
+			IPAddress:  "203.0.113.10",
+			UserAgent:  "integration-test",
+		})
+		if !errors.Is(err, auth.ErrInvalidCredentials) {
+			t.Fatalf("attempt %d LoginWithPassword() error = %v, want %v", attempt, err, auth.ErrInvalidCredentials)
+		}
+	}
+
+	updatedUser, err := env.queries.GetUserByID(ctx, user.ID)
+	if err != nil {
+		t.Fatalf("GetUserByID() error = %v", err)
+	}
+	if updatedUser.FailedLoginCount != 5 {
+		t.Fatalf("failed_login_count = %d, want 5", updatedUser.FailedLoginCount)
+	}
+	if !updatedUser.LockedUntil.Valid {
+		t.Fatal("expected user to be locked after reaching failed login threshold")
+	}
+	if !updatedUser.DisabledReason.Valid || updatedUser.DisabledReason.String != "failed_login_attempts" {
+		t.Fatalf("disabled_reason = %q, want %q", updatedUser.DisabledReason.String, "failed_login_attempts")
+	}
+}
+
+func TestPasswordLoginPersistsSessionForAuthenticatedRoutes(t *testing.T) {
+	ctx := context.Background()
+	env := newIntegrationEnv(t, ctx)
+
+	user, err := env.queries.CreateUser(ctx, sqlc.CreateUserParams{Username: "session-user", Email: "session@example.com"})
+	if err != nil {
+		t.Fatalf("CreateUser() error = %v", err)
+	}
+
+	passwordHash, err := auth.HashPassword("CorrectPassword123")
+	if err != nil {
+		t.Fatalf("HashPassword() error = %v", err)
+	}
+	if _, err := env.queries.UpsertPasswordCredential(ctx, sqlc.UpsertPasswordCredentialParams{UserID: user.ID, PasswordHash: passwordHash}); err != nil {
+		t.Fatalf("UpsertPasswordCredential() error = %v", err)
+	}
+
+	if _, err := env.db.ExecContext(ctx, `
+		UPDATE users
+		SET email_verified_at = NOW()
+		WHERE id = $1
+	`, user.ID); err != nil {
+		t.Fatalf("verify user for setup: %v", err)
+	}
+
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatalf("cookiejar.New() error = %v", err)
+	}
+	client := &http.Client{Jar: jar}
+
+	loginBody, err := json.Marshal(map[string]string{
+		"identifier": user.Email,
+		"password":   "CorrectPassword123",
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal(login payload) error = %v", err)
+	}
+
+	loginReq, err := http.NewRequestWithContext(ctx, http.MethodPost, env.server.URL+"/api/v1/auth/login", bytes.NewReader(loginBody))
+	if err != nil {
+		t.Fatalf("http.NewRequestWithContext(login) error = %v", err)
+	}
+	loginReq.Header.Set("Content-Type", "application/json")
+
+	loginResp, err := client.Do(loginReq)
+	if err != nil {
+		t.Fatalf("client.Do(login) error = %v", err)
+	}
+	defer func() { _ = loginResp.Body.Close() }()
+	if loginResp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(loginResp.Body)
+		t.Fatalf("login status = %d, want %d, body = %s", loginResp.StatusCode, http.StatusOK, strings.TrimSpace(string(body)))
+	}
+
+	meReq, err := http.NewRequestWithContext(ctx, http.MethodGet, env.server.URL+"/api/v1/auth/me", nil)
+	if err != nil {
+		t.Fatalf("http.NewRequestWithContext(me) error = %v", err)
+	}
+
+	meResp, err := client.Do(meReq)
+	if err != nil {
+		t.Fatalf("client.Do(me) error = %v", err)
+	}
+	defer func() { _ = meResp.Body.Close() }()
+	if meResp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(meResp.Body)
+		t.Fatalf("me status = %d, want %d, body = %s", meResp.StatusCode, http.StatusOK, strings.TrimSpace(string(body)))
+	}
+
+	var body struct {
+		Data struct {
+			User struct {
+				UserID   int64  `json:"user_id"`
+				Username string `json:"username"`
+				Email    string `json:"email"`
+			} `json:"user"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(meResp.Body).Decode(&body); err != nil {
+		t.Fatalf("json.NewDecoder(me body).Decode() error = %v", err)
+	}
+	if body.Data.User.UserID != user.ID {
+		t.Fatalf("me user_id = %d, want %d", body.Data.User.UserID, user.ID)
+	}
+	if body.Data.User.Email != user.Email {
+		t.Fatalf("me email = %q, want %q", body.Data.User.Email, user.Email)
+	}
+	if body.Data.User.Username != user.Username {
+		t.Fatalf("me username = %q, want %q", body.Data.User.Username, user.Username)
+	}
+}
+
+func TestOAuthSignupCreatesUserAndPersistsSession(t *testing.T) {
+	ctx := context.Background()
+	env := newIntegrationEnv(t, ctx)
+	client := newCookieClient(t)
+
+	startResp := mustDoRequest(t, client, newRequest(t, ctx, http.MethodGet, env.server.URL+"/api/v1/auth/oauth/test/start", nil))
+	defer func() { _ = startResp.Body.Close() }()
+	if startResp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(startResp.Body)
+		t.Fatalf("oauth start status = %d, want %d, body = %s", startResp.StatusCode, http.StatusOK, strings.TrimSpace(string(body)))
+	}
+
+	var startBody struct {
+		Data struct {
+			AuthorizationURL string `json:"authorization_url"`
+			Mode             string `json:"mode"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(startResp.Body).Decode(&startBody); err != nil {
+		t.Fatalf("decode oauth start response: %v", err)
+	}
+	if startBody.Data.Mode != "login" {
+		t.Fatalf("oauth start mode = %q, want %q", startBody.Data.Mode, "login")
+	}
+
+	authorizationURL, err := url.Parse(startBody.Data.AuthorizationURL)
+	if err != nil {
+		t.Fatalf("url.Parse(authorization_url) error = %v", err)
+	}
+	state := authorizationURL.Query().Get("state")
+	if state == "" {
+		t.Fatal("expected oauth state in authorization URL")
+	}
+	if authorizationURL.Query().Get("code_challenge") == "" {
+		t.Fatal("expected pkce code challenge in authorization URL")
+	}
+
+	code := env.oauthProvider.issueCode(oauthProviderProfile{
+		Subject:       "oauth-signup-user",
+		Email:         "oauth-signup@example.com",
+		EmailVerified: true,
+		Username:      "oauthsignup",
+		Name:          "OAuth Signup",
+	})
+
+	callbackURL := env.server.URL + "/api/v1/auth/oauth/test/callback?state=" + url.QueryEscape(state) + "&code=" + url.QueryEscape(code)
+	callbackResp := mustDoRequest(t, client, newRequest(t, ctx, http.MethodGet, callbackURL, nil))
+	defer func() { _ = callbackResp.Body.Close() }()
+	if callbackResp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(callbackResp.Body)
+		t.Fatalf("oauth callback status = %d, want %d, body = %s", callbackResp.StatusCode, http.StatusOK, strings.TrimSpace(string(body)))
+	}
+
+	var callbackBody struct {
+		Data struct {
+			User struct {
+				UserID   int64  `json:"user_id"`
+				Email    string `json:"email"`
+				Username string `json:"username"`
+			} `json:"user"`
+			Provider string `json:"provider"`
+			Mode     string `json:"mode"`
+			Created  bool   `json:"created"`
+			Linked   bool   `json:"linked"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(callbackResp.Body).Decode(&callbackBody); err != nil {
+		t.Fatalf("decode oauth callback response: %v", err)
+	}
+	if !callbackBody.Data.Created {
+		t.Fatal("expected oauth signup to create a user")
+	}
+	if callbackBody.Data.Linked {
+		t.Fatal("expected oauth signup response to report linked=false")
+	}
+	if callbackBody.Data.Provider != "test" {
+		t.Fatalf("oauth provider = %q, want %q", callbackBody.Data.Provider, "test")
+	}
+	if callbackBody.Data.User.Email != "oauth-signup@example.com" {
+		t.Fatalf("oauth callback email = %q, want %q", callbackBody.Data.User.Email, "oauth-signup@example.com")
+	}
+
+	meResp := mustDoRequest(t, client, newRequest(t, ctx, http.MethodGet, env.server.URL+"/api/v1/auth/me", nil))
+	defer func() { _ = meResp.Body.Close() }()
+	if meResp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(meResp.Body)
+		t.Fatalf("oauth me status = %d, want %d, body = %s", meResp.StatusCode, http.StatusOK, strings.TrimSpace(string(body)))
+	}
+
+	createdUser, err := env.queries.GetUserByEmail(ctx, "oauth-signup@example.com")
+	if err != nil {
+		t.Fatalf("GetUserByEmail() error = %v", err)
+	}
+	if !createdUser.EmailVerifiedAt.Valid {
+		t.Fatal("expected oauth signup to verify the user email")
+	}
+
+	account, err := env.queries.GetOAuthAccountByProviderIdentity(ctx, sqlc.GetOAuthAccountByProviderIdentityParams{Provider: "test", ProviderUserID: "oauth-signup-user"})
+	if err != nil {
+		t.Fatalf("GetOAuthAccountByProviderIdentity() error = %v", err)
+	}
+	if account.UserID != createdUser.ID {
+		t.Fatalf("oauth account user_id = %d, want %d", account.UserID, createdUser.ID)
+	}
+	if len(account.AccessTokenCiphertext) == 0 {
+		t.Fatal("expected encrypted oauth access token to be stored")
+	}
+	if len(account.RefreshTokenCiphertext) == 0 {
+		t.Fatal("expected encrypted oauth refresh token to be stored")
+	}
+}
+
+func TestOAuthLoginUsesExistingLinkedAccount(t *testing.T) {
+	ctx := context.Background()
+	env := newIntegrationEnv(t, ctx)
+
+	firstClient := newCookieClient(t)
+	firstUserID := completeOAuthFlowForTest(t, ctx, env, firstClient, oauthProviderProfile{
+		Subject:       "oauth-existing-user",
+		Email:         "oauth-existing@example.com",
+		EmailVerified: true,
+		Username:      "oauthexisting",
+		Name:          "OAuth Existing",
+	})
+
+	secondClient := newCookieClient(t)
+	secondUserID := completeOAuthFlowForTest(t, ctx, env, secondClient, oauthProviderProfile{
+		Subject:       "oauth-existing-user",
+		Email:         "oauth-existing@example.com",
+		EmailVerified: true,
+		Username:      "oauthexisting",
+		Name:          "OAuth Existing",
+	})
+
+	if secondUserID != firstUserID {
+		t.Fatalf("oauth login user_id = %d, want %d", secondUserID, firstUserID)
+	}
+
+	meResp := mustDoRequest(t, secondClient, newRequest(t, ctx, http.MethodGet, env.server.URL+"/api/v1/auth/me", nil))
+	defer func() { _ = meResp.Body.Close() }()
+	if meResp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(meResp.Body)
+		t.Fatalf("oauth me status = %d, want %d, body = %s", meResp.StatusCode, http.StatusOK, strings.TrimSpace(string(body)))
+	}
+}
+
+func TestOAuthLinkAddsProviderToCurrentUser(t *testing.T) {
+	ctx := context.Background()
+	env := newIntegrationEnv(t, ctx)
+
+	user, err := env.queries.CreateUser(ctx, sqlc.CreateUserParams{Username: "oauth-link-user", Email: "oauth-link@example.com"})
+	if err != nil {
+		t.Fatalf("CreateUser() error = %v", err)
+	}
+	passwordHash, err := auth.HashPassword("LinkedPassword123")
+	if err != nil {
+		t.Fatalf("HashPassword() error = %v", err)
+	}
+	if _, err := env.queries.UpsertPasswordCredential(ctx, sqlc.UpsertPasswordCredentialParams{UserID: user.ID, PasswordHash: passwordHash}); err != nil {
+		t.Fatalf("UpsertPasswordCredential() error = %v", err)
+	}
+	if err := env.queries.MarkUserEmailVerified(ctx, user.ID); err != nil {
+		t.Fatalf("MarkUserEmailVerified() error = %v", err)
+	}
+	role, err := env.queries.GetRoleByName(ctx, "user")
+	if err != nil {
+		t.Fatalf("GetRoleByName() error = %v", err)
+	}
+	if err := env.queries.AddUserRole(ctx, sqlc.AddUserRoleParams{UserID: user.ID, RoleID: role.ID}); err != nil {
+		t.Fatalf("AddUserRole() error = %v", err)
+	}
+
+	client := newCookieClient(t)
+	loginBody, err := json.Marshal(map[string]string{
+		"identifier": user.Email,
+		"password":   "LinkedPassword123",
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal(login payload) error = %v", err)
+	}
+	loginResp := mustDoRequest(t, client, newRequest(t, ctx, http.MethodPost, env.server.URL+"/api/v1/auth/login", bytes.NewReader(loginBody), withJSONContentType()))
+	defer func() { _ = loginResp.Body.Close() }()
+	if loginResp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(loginResp.Body)
+		t.Fatalf("password login status = %d, want %d, body = %s", loginResp.StatusCode, http.StatusOK, strings.TrimSpace(string(body)))
+	}
+
+	startResp := mustDoRequest(t, client, newRequest(t, ctx, http.MethodGet, env.server.URL+"/api/v1/auth/oauth/test/start", nil))
+	defer func() { _ = startResp.Body.Close() }()
+	if startResp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(startResp.Body)
+		t.Fatalf("oauth start status = %d, want %d, body = %s", startResp.StatusCode, http.StatusOK, strings.TrimSpace(string(body)))
+	}
+
+	var startBody struct {
+		Data struct {
+			AuthorizationURL string `json:"authorization_url"`
+			Mode             string `json:"mode"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(startResp.Body).Decode(&startBody); err != nil {
+		t.Fatalf("decode oauth start response: %v", err)
+	}
+	if startBody.Data.Mode != "link" {
+		t.Fatalf("oauth start mode = %q, want %q", startBody.Data.Mode, "link")
+	}
+	authorizationURL, err := url.Parse(startBody.Data.AuthorizationURL)
+	if err != nil {
+		t.Fatalf("url.Parse(authorization_url) error = %v", err)
+	}
+
+	code := env.oauthProvider.issueCode(oauthProviderProfile{
+		Subject:       "oauth-linked-provider-user",
+		Email:         "provider-only@example.com",
+		EmailVerified: true,
+		Username:      "providerlink",
+		Name:          "Provider Link",
+	})
+	callbackURL := env.server.URL + "/api/v1/auth/oauth/test/callback?state=" + url.QueryEscape(authorizationURL.Query().Get("state")) + "&code=" + url.QueryEscape(code)
+	callbackResp := mustDoRequest(t, client, newRequest(t, ctx, http.MethodGet, callbackURL, nil))
+	defer func() { _ = callbackResp.Body.Close() }()
+	if callbackResp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(callbackResp.Body)
+		t.Fatalf("oauth link callback status = %d, want %d, body = %s", callbackResp.StatusCode, http.StatusOK, strings.TrimSpace(string(body)))
+	}
+
+	var callbackBody struct {
+		Data struct {
+			User struct {
+				UserID int64 `json:"user_id"`
+			} `json:"user"`
+			Mode   string `json:"mode"`
+			Linked bool   `json:"linked"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(callbackResp.Body).Decode(&callbackBody); err != nil {
+		t.Fatalf("decode oauth link callback response: %v", err)
+	}
+	if callbackBody.Data.Mode != "link" {
+		t.Fatalf("oauth callback mode = %q, want %q", callbackBody.Data.Mode, "link")
+	}
+	if !callbackBody.Data.Linked {
+		t.Fatal("expected oauth link response to report linked=true")
+	}
+	if callbackBody.Data.User.UserID != user.ID {
+		t.Fatalf("oauth link user_id = %d, want %d", callbackBody.Data.User.UserID, user.ID)
+	}
+
+	account, err := env.queries.GetOAuthAccountByProviderIdentity(ctx, sqlc.GetOAuthAccountByProviderIdentityParams{Provider: "test", ProviderUserID: "oauth-linked-provider-user"})
+	if err != nil {
+		t.Fatalf("GetOAuthAccountByProviderIdentity() error = %v", err)
+	}
+	if account.UserID != user.ID {
+		t.Fatalf("oauth account user_id = %d, want %d", account.UserID, user.ID)
+	}
+}
+
+func TestOAuthLinkConflictWhenIdentityBelongsToAnotherUser(t *testing.T) {
+	ctx := context.Background()
+	env := newIntegrationEnv(t, ctx)
+
+	ownerClient := newCookieClient(t)
+	ownerUserID := completeOAuthFlowForTest(t, ctx, env, ownerClient, oauthProviderProfile{
+		Subject:       "oauth-conflict-user",
+		Email:         "oauth-conflict-owner@example.com",
+		EmailVerified: true,
+		Username:      "oauthowner",
+		Name:          "OAuth Owner",
+	})
+
+	user, err := env.queries.CreateUser(ctx, sqlc.CreateUserParams{Username: "oauth-conflict-linker", Email: "oauth-conflict-linker@example.com"})
+	if err != nil {
+		t.Fatalf("CreateUser() error = %v", err)
+	}
+	passwordHash, err := auth.HashPassword("LinkedPassword123")
+	if err != nil {
+		t.Fatalf("HashPassword() error = %v", err)
+	}
+	if _, err := env.queries.UpsertPasswordCredential(ctx, sqlc.UpsertPasswordCredentialParams{UserID: user.ID, PasswordHash: passwordHash}); err != nil {
+		t.Fatalf("UpsertPasswordCredential() error = %v", err)
+	}
+	if err := env.queries.MarkUserEmailVerified(ctx, user.ID); err != nil {
+		t.Fatalf("MarkUserEmailVerified() error = %v", err)
+	}
+	role, err := env.queries.GetRoleByName(ctx, "user")
+	if err != nil {
+		t.Fatalf("GetRoleByName() error = %v", err)
+	}
+	if err := env.queries.AddUserRole(ctx, sqlc.AddUserRoleParams{UserID: user.ID, RoleID: role.ID}); err != nil {
+		t.Fatalf("AddUserRole() error = %v", err)
+	}
+
+	client := newCookieClient(t)
+	loginBody, err := json.Marshal(map[string]string{
+		"identifier": user.Email,
+		"password":   "LinkedPassword123",
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal(login payload) error = %v", err)
+	}
+	loginResp := mustDoRequest(t, client, newRequest(t, ctx, http.MethodPost, env.server.URL+"/api/v1/auth/login", bytes.NewReader(loginBody), withJSONContentType()))
+	defer func() { _ = loginResp.Body.Close() }()
+	if loginResp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(loginResp.Body)
+		t.Fatalf("password login status = %d, want %d, body = %s", loginResp.StatusCode, http.StatusOK, strings.TrimSpace(string(body)))
+	}
+
+	startResp := mustDoRequest(t, client, newRequest(t, ctx, http.MethodGet, env.server.URL+"/api/v1/auth/oauth/test/start", nil))
+	defer func() { _ = startResp.Body.Close() }()
+	if startResp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(startResp.Body)
+		t.Fatalf("oauth start status = %d, want %d, body = %s", startResp.StatusCode, http.StatusOK, strings.TrimSpace(string(body)))
+	}
+
+	var startBody struct {
+		Data struct {
+			AuthorizationURL string `json:"authorization_url"`
+			Mode             string `json:"mode"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(startResp.Body).Decode(&startBody); err != nil {
+		t.Fatalf("decode oauth start response: %v", err)
+	}
+	if startBody.Data.Mode != "link" {
+		t.Fatalf("oauth start mode = %q, want %q", startBody.Data.Mode, "link")
+	}
+
+	authorizationURL, err := url.Parse(startBody.Data.AuthorizationURL)
+	if err != nil {
+		t.Fatalf("url.Parse(authorization_url) error = %v", err)
+	}
+
+	code := env.oauthProvider.issueCode(oauthProviderProfile{
+		Subject:       "oauth-conflict-user",
+		Email:         "oauth-conflict-owner@example.com",
+		EmailVerified: true,
+		Username:      "oauthowner",
+		Name:          "OAuth Owner",
+	})
+	callbackURL := env.server.URL + "/api/v1/auth/oauth/test/callback?state=" + url.QueryEscape(authorizationURL.Query().Get("state")) + "&code=" + url.QueryEscape(code)
+	callbackResp := mustDoRequest(t, client, newRequest(t, ctx, http.MethodGet, callbackURL, nil))
+	defer func() { _ = callbackResp.Body.Close() }()
+	if callbackResp.StatusCode != http.StatusConflict {
+		body, _ := io.ReadAll(callbackResp.Body)
+		t.Fatalf("oauth link conflict status = %d, want %d, body = %s", callbackResp.StatusCode, http.StatusConflict, strings.TrimSpace(string(body)))
+	}
+
+	var errorBody struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.NewDecoder(callbackResp.Body).Decode(&errorBody); err != nil {
+		t.Fatalf("decode oauth conflict response: %v", err)
+	}
+	if errorBody.Error.Code != "oauth_conflict" {
+		t.Fatalf("oauth conflict error code = %q, want %q", errorBody.Error.Code, "oauth_conflict")
+	}
+
+	account, err := env.queries.GetOAuthAccountByProviderIdentity(ctx, sqlc.GetOAuthAccountByProviderIdentityParams{Provider: "test", ProviderUserID: "oauth-conflict-user"})
+	if err != nil {
+		t.Fatalf("GetOAuthAccountByProviderIdentity() error = %v", err)
+	}
+	if account.UserID != ownerUserID {
+		t.Fatalf("oauth account user_id = %d, want %d", account.UserID, ownerUserID)
+	}
+	if account.UserID == user.ID {
+		t.Fatal("expected oauth account to remain linked to the original user")
+	}
+}
+
 func postJSON(t *testing.T, endpoint string, payload any) *http.Response {
 	t.Helper()
 
@@ -336,15 +855,18 @@ func postJSON(t *testing.T, endpoint string, payload any) *http.Response {
 }
 
 type integrationEnv struct {
-	db          *sql.DB
-	pool        *pgxpool.Pool
-	server      *httptest.Server
-	queries     *sqlc.Queries
-	authService *auth.Service
+	db            *sql.DB
+	pool          *pgxpool.Pool
+	server        *httptest.Server
+	queries       *sqlc.Queries
+	authService   *auth.Service
+	oauthProvider *oauthTestProvider
 }
 
 func newIntegrationEnv(t *testing.T, ctx context.Context) *integrationEnv {
 	t.Helper()
+
+	oauthProvider := newOAuthTestProvider(t)
 
 	container, err := tcpostgres.Run(
 		ctx,
@@ -411,6 +933,23 @@ func newIntegrationEnv(t *testing.T, ctx context.Context) *integrationEnv {
 			FailedLoginWindow:    15 * time.Minute,
 			TOTPIssuer:           "base-test",
 		},
+		OAuth: config.OAuthConfig{
+			StateTTL:          10 * time.Minute,
+			StateBytes:        32,
+			PKCEVerifierBytes: 32,
+			Providers: map[string]config.OAuthProviderConfig{
+				"test": {
+					Enabled:      true,
+					ClientID:     "client-id",
+					ClientSecret: "client-secret",
+					AuthURL:      oauthProvider.server.URL + "/oauth/authorize",
+					TokenURL:     oauthProvider.server.URL + "/oauth/token",
+					UserInfoURL:  oauthProvider.server.URL + "/userinfo",
+					RedirectURL:  "http://app.local/api/v1/auth/oauth/test/callback",
+					Scopes:       []string{"openid", "email", "profile"},
+				},
+			},
+		},
 		WebAuthn: config.WebAuthnConfig{
 			RPID:          "localhost",
 			RPDisplayName: "Base Test",
@@ -445,10 +984,213 @@ func newIntegrationEnv(t *testing.T, ctx context.Context) *integrationEnv {
 	t.Cleanup(server.Close)
 
 	return &integrationEnv{
-		db:          db,
-		pool:        pool,
-		server:      server,
-		queries:     sqlc.New(db),
-		authService: authService,
+		db:            db,
+		pool:          pool,
+		server:        server,
+		queries:       sqlc.New(db),
+		authService:   authService,
+		oauthProvider: oauthProvider,
 	}
+}
+
+type oauthProviderProfile struct {
+	Subject       string
+	Email         string
+	EmailVerified bool
+	Username      string
+	Name          string
+}
+
+type oauthTestProvider struct {
+	server       *httptest.Server
+	mu           sync.Mutex
+	authorizeMap map[string]oauthProviderProfile
+	tokenMap     map[string]oauthProviderProfile
+}
+
+func newOAuthTestProvider(t *testing.T) *oauthTestProvider {
+	t.Helper()
+
+	provider := &oauthTestProvider{
+		authorizeMap: map[string]oauthProviderProfile{},
+		tokenMap:     map[string]oauthProviderProfile{},
+	}
+	provider.server = httptest.NewServer(http.HandlerFunc(provider.serveHTTP))
+	t.Cleanup(provider.server.Close)
+	return provider
+}
+
+func (provider *oauthTestProvider) issueCode(profile oauthProviderProfile) string {
+	provider.mu.Lock()
+	defer provider.mu.Unlock()
+
+	plain, _, err := auth.NewToken()
+	if err != nil {
+		panic(err)
+	}
+	provider.authorizeMap[plain] = profile
+	return plain
+}
+
+func (provider *oauthTestProvider) serveHTTP(w http.ResponseWriter, r *http.Request) {
+	switch r.URL.Path {
+	case "/oauth/authorize":
+		redirectURI := r.URL.Query().Get("redirect_uri")
+		state := r.URL.Query().Get("state")
+		code := provider.issueCode(oauthProviderProfile{
+			Subject:       "authorize-flow-user",
+			Email:         "authorize-flow@example.com",
+			EmailVerified: true,
+			Username:      "authorizeflow",
+			Name:          "Authorize Flow",
+		})
+		redirectTo := redirectURI + "?state=" + url.QueryEscape(state) + "&code=" + url.QueryEscape(code)
+		http.Redirect(w, r, redirectTo, http.StatusFound)
+	case "/oauth/token":
+		if err := r.ParseForm(); err != nil {
+			writeOAuthProviderError(w, http.StatusBadRequest, "invalid form")
+			return
+		}
+		code := strings.TrimSpace(r.Form.Get("code"))
+		if code == "" || strings.TrimSpace(r.Form.Get("code_verifier")) == "" {
+			writeOAuthProviderError(w, http.StatusBadRequest, "missing code or verifier")
+			return
+		}
+
+		provider.mu.Lock()
+		profile, ok := provider.authorizeMap[code]
+		if ok {
+			delete(provider.authorizeMap, code)
+		}
+		provider.mu.Unlock()
+		if !ok {
+			writeOAuthProviderError(w, http.StatusBadRequest, "unknown code")
+			return
+		}
+
+		accessToken := "access-" + code
+		provider.mu.Lock()
+		provider.tokenMap[accessToken] = profile
+		provider.mu.Unlock()
+
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"access_token":  accessToken,
+			"refresh_token": "refresh-" + code,
+			"expires_in":    3600,
+			"token_type":    "Bearer",
+		})
+	case "/userinfo":
+		token := strings.TrimPrefix(strings.TrimSpace(r.Header.Get("Authorization")), "Bearer ")
+		provider.mu.Lock()
+		profile, ok := provider.tokenMap[token]
+		provider.mu.Unlock()
+		if !ok {
+			writeOAuthProviderError(w, http.StatusUnauthorized, "unknown token")
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"sub":                profile.Subject,
+			"email":              profile.Email,
+			"email_verified":     profile.EmailVerified,
+			"preferred_username": profile.Username,
+			"name":               profile.Name,
+		})
+	default:
+		http.NotFound(w, r)
+	}
+}
+
+func writeOAuthProviderError(w http.ResponseWriter, status int, message string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]string{"error": message})
+}
+
+func completeOAuthFlowForTest(t *testing.T, ctx context.Context, env *integrationEnv, client *http.Client, profile oauthProviderProfile) int64 {
+	t.Helper()
+
+	startResp := mustDoRequest(t, client, newRequest(t, ctx, http.MethodGet, env.server.URL+"/api/v1/auth/oauth/test/start", nil))
+	defer func() { _ = startResp.Body.Close() }()
+	if startResp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(startResp.Body)
+		t.Fatalf("oauth start status = %d, want %d, body = %s", startResp.StatusCode, http.StatusOK, strings.TrimSpace(string(body)))
+	}
+
+	var startBody struct {
+		Data struct {
+			AuthorizationURL string `json:"authorization_url"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(startResp.Body).Decode(&startBody); err != nil {
+		t.Fatalf("decode oauth start response: %v", err)
+	}
+	authorizationURL, err := url.Parse(startBody.Data.AuthorizationURL)
+	if err != nil {
+		t.Fatalf("url.Parse(authorization_url) error = %v", err)
+	}
+
+	code := env.oauthProvider.issueCode(profile)
+	callbackURL := env.server.URL + "/api/v1/auth/oauth/test/callback?state=" + url.QueryEscape(authorizationURL.Query().Get("state")) + "&code=" + url.QueryEscape(code)
+	callbackResp := mustDoRequest(t, client, newRequest(t, ctx, http.MethodGet, callbackURL, nil))
+	defer func() { _ = callbackResp.Body.Close() }()
+	if callbackResp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(callbackResp.Body)
+		t.Fatalf("oauth callback status = %d, want %d, body = %s", callbackResp.StatusCode, http.StatusOK, strings.TrimSpace(string(body)))
+	}
+
+	var callbackBody struct {
+		Data struct {
+			User struct {
+				UserID int64 `json:"user_id"`
+			} `json:"user"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(callbackResp.Body).Decode(&callbackBody); err != nil {
+		t.Fatalf("decode oauth callback response: %v", err)
+	}
+	return callbackBody.Data.User.UserID
+}
+
+func newCookieClient(t *testing.T) *http.Client {
+	t.Helper()
+
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatalf("cookiejar.New() error = %v", err)
+	}
+	return &http.Client{Jar: jar}
+}
+
+type requestOption func(*http.Request)
+
+func withJSONContentType() requestOption {
+	return func(req *http.Request) {
+		req.Header.Set("Content-Type", "application/json")
+	}
+}
+
+func newRequest(t *testing.T, ctx context.Context, method string, endpoint string, body io.Reader, options ...requestOption) *http.Request {
+	t.Helper()
+
+	req, err := http.NewRequestWithContext(ctx, method, endpoint, body)
+	if err != nil {
+		t.Fatalf("http.NewRequestWithContext() error = %v", err)
+	}
+	for _, option := range options {
+		option(req)
+	}
+	return req
+}
+
+func mustDoRequest(t *testing.T, client *http.Client, req *http.Request) *http.Response {
+	t.Helper()
+
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("client.Do() error = %v", err)
+	}
+	return resp
 }

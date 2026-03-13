@@ -47,33 +47,3 @@ WHERE id = $1;
 DELETE FROM user_tokens
 WHERE used_at IS NOT NULL
    OR expires_at < NOW();
-
--- name: InsertLoginAttempt :one
-INSERT INTO login_attempts (
-    user_id,
-    username,
-    success,
-    ip_address,
-    user_agent
-) VALUES (
-    $1,
-    $2,
-    $3,
-    $4,
-    $5
-)
-RETURNING *;
-
--- name: CountRecentFailedAttemptsByUser :one
-SELECT COUNT(*)
-FROM login_attempts
-WHERE user_id = $1
-  AND success = FALSE
-  AND created_at >= $2;
-
--- name: CountRecentFailedAttemptsByUsername :one
-SELECT COUNT(*)
-FROM login_attempts
-WHERE username = $1
-  AND success = FALSE
-  AND created_at >= $2;

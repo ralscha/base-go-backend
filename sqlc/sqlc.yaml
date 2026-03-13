@@ -17,3 +17,7 @@ sql:
             go_type: "time.Time"
           - db_type: "pg_catalog.int8"
             go_type: "int64"
+          - db_type: "jsonb"
+            go_type:
+              import: "base/internal/store/dbtype"
+              type: "RawMessage"

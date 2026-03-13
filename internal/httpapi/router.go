@@ -22,9 +22,10 @@ func NewRouter(db *sql.DB, sessions *scs.SessionManager, authService *auth.Servi
 		r.Use(chimw.Logger)
 	}
 	r.Use(chimw.Recoverer)
-	r.Use(chimw.Timeout(cfg.HTTP.WriteTimeout))
+	if cfg.HTTP.WriteTimeout > 0 {
+		r.Use(chimw.Timeout(cfg.HTTP.WriteTimeout))
+	}
 	r.Use(chimw.NoCache)
-	r.Use(appmw.SecurityHeaders)
 
 	health := handlers.HealthHandler{DB: db}
 	authHandler := handlers.AuthHandler{Service: authService, Sessions: sessions, Secure: cfg.Session.Secure, LoginRateLimiter: loginLimiter}
@@ -36,14 +37,20 @@ func NewRouter(db *sql.DB, sessions *scs.SessionManager, authService *auth.Servi
 	r.Route("/api/v1", func(api chi.Router) {
 		api.Route("/auth", func(public chi.Router) {
 			public.Post("/register", authHandler.Register)
-			public.Post("/login", authHandler.Login)
-			public.Post("/passkeys/login/start", authHandler.BeginPasskeyLogin)
-			public.Post("/passkeys/login/finish", authHandler.FinishPasskeyLogin)
 			public.Get("/verify-email", authHandler.VerifyEmail)
 			public.Post("/account-recovery/request", authHandler.RequestAccountRecovery)
 			public.Post("/account-recovery/confirm", authHandler.RecoverAccount)
 			public.Post("/password-reset/request", authHandler.RequestPasswordReset)
 			public.Post("/password-reset/confirm", authHandler.ResetPassword)
+
+			public.Group(func(sessioned chi.Router) {
+				sessioned.Use(sessions.LoadAndSave)
+				sessioned.Post("/login", authHandler.Login)
+				sessioned.Get("/oauth/{provider}/start", authHandler.StartOAuth)
+				sessioned.Get("/oauth/{provider}/callback", authHandler.CompleteOAuth)
+				sessioned.Post("/passkeys/login/start", authHandler.BeginPasskeyLogin)
+				sessioned.Post("/passkeys/login/finish", authHandler.FinishPasskeyLogin)
+			})
 
 			public.Group(func(protected chi.Router) {
 				protected.Use(sessions.LoadAndSave)

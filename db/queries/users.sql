@@ -41,10 +41,11 @@ UPDATE users
 SET last_seen_at = NOW()
 WHERE id = $1;
 
--- name: IncrementFailedLogin :exec
+-- name: IncrementFailedLogin :one
 UPDATE users
 SET failed_login_count = failed_login_count + 1
-WHERE id = $1;
+WHERE id = $1
+RETURNING *;
 
 -- name: LockUserUntil :exec
 UPDATE users
