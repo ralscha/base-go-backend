@@ -45,5 +45,9 @@ WHERE id = $1;
 
 -- name: DeleteExpiredUserTokens :execrows
 DELETE FROM user_tokens
-WHERE used_at IS NOT NULL
-   OR expires_at < NOW();
+WHERE expires_at < NOW()
+    AND used_at IS NULL;
+
+-- name: DeleteUsedUserTokens :execrows
+DELETE FROM user_tokens
+WHERE used_at IS NOT NULL;

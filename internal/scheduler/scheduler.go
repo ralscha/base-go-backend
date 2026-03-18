@@ -106,18 +106,32 @@ func (s *Scheduler) processOutbox(ctx context.Context) {
 }
 
 func (s *Scheduler) cleanup(ctx context.Context) {
-	deletedUser, err := s.q.DeleteExpiredUserSessions(ctx)
+	deletedExpiredSessions, err := s.q.DeleteExpiredUserSessions(ctx)
 	if err != nil {
 		s.logger.Error("delete expired user sessions", slog.Any("err", err))
-	} else if deletedUser > 0 {
-		s.logger.Info("deleted expired user sessions", slog.Int64("count", deletedUser))
+	} else if deletedExpiredSessions > 0 {
+		s.logger.Info("deleted expired user sessions", slog.Int64("count", deletedExpiredSessions))
 	}
 
-	deletedTokens, err := s.q.DeleteExpiredUserTokens(ctx)
+	deletedRevokedSessions, err := s.q.DeleteRevokedUserSessions(ctx)
+	if err != nil {
+		s.logger.Error("delete revoked user sessions", slog.Any("err", err))
+	} else if deletedRevokedSessions > 0 {
+		s.logger.Info("deleted revoked user sessions", slog.Int64("count", deletedRevokedSessions))
+	}
+
+	deletedExpiredTokens, err := s.q.DeleteExpiredUserTokens(ctx)
 	if err != nil {
 		s.logger.Error("delete expired user tokens", slog.Any("err", err))
-	} else if deletedTokens > 0 {
-		s.logger.Info("deleted expired user tokens", slog.Int64("count", deletedTokens))
+	} else if deletedExpiredTokens > 0 {
+		s.logger.Info("deleted expired user tokens", slog.Int64("count", deletedExpiredTokens))
+	}
+
+	deletedUsedTokens, err := s.q.DeleteUsedUserTokens(ctx)
+	if err != nil {
+		s.logger.Error("delete used user tokens", slog.Any("err", err))
+	} else if deletedUsedTokens > 0 {
+		s.logger.Info("deleted used user tokens", slog.Int64("count", deletedUsedTokens))
 	}
 
 	if s.auth != nil && s.auth.RateLimiter() != nil {

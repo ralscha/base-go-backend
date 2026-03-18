@@ -8,9 +8,7 @@ WHERE provider = $1
 SELECT *
 FROM oauth_accounts
 WHERE user_id = $1
-  AND provider = $2
-ORDER BY id
-LIMIT 1;
+  AND provider = $2;
 
 -- name: UpsertOAuthAccount :one
 INSERT INTO oauth_accounts (

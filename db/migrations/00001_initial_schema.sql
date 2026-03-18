@@ -49,6 +49,7 @@ CREATE TABLE IF NOT EXISTS oauth_accounts (
     token_expires_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (user_id, provider),
     UNIQUE (provider, provider_user_id)
 );
 
@@ -139,10 +140,11 @@ CREATE TABLE IF NOT EXISTS scheduled_jobs (
 
 CREATE INDEX IF NOT EXISTS idx_sessions_expiry ON sessions (expiry);
 CREATE INDEX IF NOT EXISTS idx_passkey_credentials_user_id ON passkey_credentials (user_id);
-CREATE INDEX IF NOT EXISTS idx_oauth_accounts_user_id ON oauth_accounts (user_id);
 CREATE INDEX IF NOT EXISTS idx_user_sessions_user_device ON user_sessions (user_id, device_id) WHERE revoked_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_user_sessions_revoked_at ON user_sessions (revoked_at) WHERE revoked_at IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_user_sessions_expiry ON user_sessions (expiry);
-CREATE INDEX IF NOT EXISTS idx_user_tokens_user_id ON user_tokens (user_id);
+CREATE INDEX IF NOT EXISTS idx_user_tokens_expires_at ON user_tokens (expires_at) WHERE used_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_user_tokens_used_at ON user_tokens (used_at) WHERE used_at IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_email_outbox_available_at ON email_outbox (available_at) WHERE sent_at IS NULL;
 
 INSERT INTO roles (name, description)

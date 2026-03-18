@@ -14,10 +14,10 @@ require (
 	github.com/knadh/koanf/providers/env v1.1.0
 	github.com/knadh/koanf/providers/file v1.2.1
 	github.com/knadh/koanf/v2 v2.3.3
-	github.com/lib/pq v1.11.2
+	github.com/lib/pq v1.12.0
 	github.com/pquerna/otp v1.5.0
 	github.com/pressly/goose/v3 v3.27.0
-	github.com/ralscha/ratelimiter-pg v0.0.0-20260309133936-409e93c0799b
+	github.com/ralscha/ratelimiter-pg v0.0.0-20260316181956-083e76d2ae8e
 	github.com/sqlc-dev/pqtype v0.3.0
 	github.com/testcontainers/testcontainers-go/modules/postgres v0.39.0
 )

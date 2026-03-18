@@ -20,8 +20,11 @@ WHERE user_id = $1
 
 -- name: DeleteExpiredUserSessions :execrows
 DELETE FROM user_sessions
-WHERE expiry < NOW()
-   OR revoked_at IS NOT NULL;
+WHERE expiry < NOW();
+
+-- name: DeleteRevokedUserSessions :execrows
+DELETE FROM user_sessions
+WHERE revoked_at IS NOT NULL;
 
 -- name: RevokeAllUserSessions :exec
 DELETE FROM sessions
