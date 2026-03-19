@@ -3,6 +3,7 @@
 .local/.env
 bin/
 coverage.out
+coverage.html
 dist/
 tmp/
 vendor/

@@ -53,7 +53,7 @@ func contains(items []string, wanted string) bool {
 }
 
 func writeAuthzError(w http.ResponseWriter, status int, code, message string) {
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	var payload apiError
 	payload.Error.Code = code
