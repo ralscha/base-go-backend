@@ -10,32 +10,12 @@ import (
 	"testing"
 	"time"
 
-	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
+	"base/internal/testutil"
 )
 
 func TestRunStartsAndStopsApp(t *testing.T) {
 	ctx := context.Background()
-	container, err := tcpostgres.Run(
-		ctx,
-		"postgres:18-alpine",
-		tcpostgres.BasicWaitStrategies(),
-		tcpostgres.WithDatabase("base"),
-		tcpostgres.WithUsername("base_user"),
-		tcpostgres.WithPassword("base_password"),
-	)
-	if err != nil {
-		t.Fatalf("postgres.Run() error = %v", err)
-	}
-	t.Cleanup(func() {
-		terminateCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		_ = container.Terminate(terminateCtx)
-	})
-
-	databaseURL, err := container.ConnectionString(ctx, "sslmode=disable")
-	if err != nil {
-		t.Fatalf("ConnectionString() error = %v", err)
-	}
+	databaseURL := testutil.FreshPostgresDatabaseURL(t, ctx)
 
 	workingDir, err := os.Getwd()
 	if err != nil {

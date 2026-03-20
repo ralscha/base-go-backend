@@ -17,12 +17,12 @@ import (
 	"base/internal/config"
 	"base/internal/database"
 	"base/internal/store/sqlc"
+	"base/internal/testutil"
 
 	"github.com/alexedwards/scs/v2"
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pquerna/otp/totp"
-	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
 )
 
 func TestLogoutDestroysSession(t *testing.T) {
@@ -855,27 +855,7 @@ func TestRequestAccountRecoveryAcceptedAndRecoverAccountSuccess(t *testing.T) {
 func newHandlerAuthTestEnv(t *testing.T, ctx context.Context) (*sql.DB, *sqlc.Queries, *auth.Service) {
 	t.Helper()
 
-	container, err := tcpostgres.Run(
-		ctx,
-		"postgres:18-alpine",
-		tcpostgres.BasicWaitStrategies(),
-		tcpostgres.WithDatabase("base"),
-		tcpostgres.WithUsername("base_user"),
-		tcpostgres.WithPassword("base_password"),
-	)
-	if err != nil {
-		t.Fatalf("postgres.Run() error = %v", err)
-	}
-	t.Cleanup(func() {
-		terminateCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		_ = container.Terminate(terminateCtx)
-	})
-
-	databaseURL, err := container.ConnectionString(ctx, "sslmode=disable")
-	if err != nil {
-		t.Fatalf("ConnectionString() error = %v", err)
-	}
+	databaseURL := testutil.FreshPostgresDatabaseURL(t, ctx)
 
 	dbCfg := config.DatabaseConfig{URL: databaseURL, MaxOpenConns: 5, MaxIdleConns: 2, ConnMaxLifetime: time.Minute, ConnMaxIdleTime: time.Minute}
 	db, err := database.Open(ctx, dbCfg)

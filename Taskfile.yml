@@ -27,7 +27,8 @@ tasks:
   coverage:
     desc: Generate test coverage report
     cmds:
-      - go test -coverprofile=coverage.out ./...
+      - go test -coverprofile=coverage.raw.out ./...
+      - go run ./cmd/coveragefilter -in coverage.raw.out -out coverage.out -exclude base/internal/store/sqlc/
       - go tool cover -func=coverage.out
       - go tool cover -html=coverage.out -o coverage.html
 

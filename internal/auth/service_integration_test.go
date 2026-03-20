@@ -12,13 +12,13 @@ import (
 	"base/internal/config"
 	"base/internal/database"
 	"base/internal/store/sqlc"
+	"base/internal/testutil"
 
 	"github.com/go-webauthn/webauthn/protocol"
 	wa "github.com/go-webauthn/webauthn/webauthn"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pquerna/otp/totp"
-	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
 )
 
 const testNewUserEmail = "newuser@example.com"
@@ -890,27 +890,7 @@ func newAuthTestDB(t *testing.T, ctx context.Context) (*sql.DB, *sqlc.Queries) {
 func newAuthTestDBWithURL(t *testing.T, ctx context.Context) (*sql.DB, *sqlc.Queries, string) {
 	t.Helper()
 
-	container, err := tcpostgres.Run(
-		ctx,
-		"postgres:18-alpine",
-		tcpostgres.BasicWaitStrategies(),
-		tcpostgres.WithDatabase("base"),
-		tcpostgres.WithUsername("base_user"),
-		tcpostgres.WithPassword("base_password"),
-	)
-	if err != nil {
-		t.Fatalf("postgres.Run() error = %v", err)
-	}
-	t.Cleanup(func() {
-		terminateCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		_ = container.Terminate(terminateCtx)
-	})
-
-	databaseURL, err := container.ConnectionString(ctx, "sslmode=disable")
-	if err != nil {
-		t.Fatalf("ConnectionString() error = %v", err)
-	}
+	databaseURL := testutil.FreshPostgresDatabaseURL(t, ctx)
 
 	db, err := database.Open(ctx, config.DatabaseConfig{
 		URL:             databaseURL,

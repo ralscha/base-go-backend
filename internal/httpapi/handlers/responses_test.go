@@ -11,8 +11,7 @@ import (
 
 	"base/internal/config"
 	"base/internal/database"
-
-	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
+	"base/internal/testutil"
 )
 
 func TestWriteJSON(t *testing.T) {
@@ -90,27 +89,7 @@ func TestHealthHandlerLive(t *testing.T) {
 func TestHealthHandlerReady(t *testing.T) {
 	t.Run("healthy", func(t *testing.T) {
 		ctx := context.Background()
-		container, err := tcpostgres.Run(
-			ctx,
-			"postgres:18-alpine",
-			tcpostgres.BasicWaitStrategies(),
-			tcpostgres.WithDatabase("base"),
-			tcpostgres.WithUsername("base_user"),
-			tcpostgres.WithPassword("base_password"),
-		)
-		if err != nil {
-			t.Fatalf("postgres.Run() error = %v", err)
-		}
-		defer func() {
-			terminateCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			defer cancel()
-			_ = container.Terminate(terminateCtx)
-		}()
-
-		databaseURL, err := container.ConnectionString(ctx, "sslmode=disable")
-		if err != nil {
-			t.Fatalf("ConnectionString() error = %v", err)
-		}
+		databaseURL := testutil.FreshPostgresDatabaseURL(t, ctx)
 
 		db, err := database.Open(ctx, config.DatabaseConfig{URL: databaseURL, MaxOpenConns: 5, MaxIdleConns: 2, ConnMaxLifetime: time.Minute, ConnMaxIdleTime: time.Minute})
 		if err != nil {

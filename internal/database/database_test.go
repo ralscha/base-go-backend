@@ -9,8 +9,7 @@ import (
 	"time"
 
 	"base/internal/config"
-
-	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
+	"base/internal/testutil"
 )
 
 func TestOpenConnectsToPostgresContainer(t *testing.T) {
@@ -113,28 +112,7 @@ func TestRunMigrationsCreatesSchemaAndCanBeReapplied(t *testing.T) {
 func startTestPostgres(t *testing.T, ctx context.Context) string {
 	t.Helper()
 
-	container, err := tcpostgres.Run(
-		ctx,
-		"postgres:18-alpine",
-		tcpostgres.BasicWaitStrategies(),
-		tcpostgres.WithDatabase("base"),
-		tcpostgres.WithUsername("base_user"),
-		tcpostgres.WithPassword("base_password"),
-	)
-	if err != nil {
-		t.Fatalf("postgres.Run() error = %v", err)
-	}
-	t.Cleanup(func() {
-		terminateCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		_ = container.Terminate(terminateCtx)
-	})
-
-	databaseURL, err := container.ConnectionString(ctx, "sslmode=disable")
-	if err != nil {
-		t.Fatalf("ConnectionString() error = %v", err)
-	}
-	return databaseURL
+	return testutil.FreshPostgresDatabaseURL(t, ctx)
 }
 
 func openTestDB(t *testing.T, ctx context.Context, databaseURL string) *sql.DB {

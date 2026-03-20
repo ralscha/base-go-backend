@@ -21,13 +21,13 @@ import (
 	"base/internal/database"
 	"base/internal/httpapi"
 	"base/internal/store/sqlc"
+	"base/internal/testutil"
 
 	"github.com/alexedwards/scs/pgxstore"
 	"github.com/alexedwards/scs/v2"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pquerna/otp/totp"
 	ratelimit "github.com/ralscha/ratelimiter-pg"
-	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
 )
 
 func TestAccountRecoveryFlowReactivatesUserAndClearsTOTP(t *testing.T) {
@@ -868,27 +868,7 @@ func newIntegrationEnv(t *testing.T, ctx context.Context) *integrationEnv {
 
 	oauthProvider := newOAuthTestProvider(t)
 
-	container, err := tcpostgres.Run(
-		ctx,
-		"postgres:18-alpine",
-		tcpostgres.BasicWaitStrategies(),
-		tcpostgres.WithDatabase("base"),
-		tcpostgres.WithUsername("base_user"),
-		tcpostgres.WithPassword("base_password"),
-	)
-	if err != nil {
-		t.Fatalf("postgres.Run() error = %v", err)
-	}
-	t.Cleanup(func() {
-		terminateCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		_ = container.Terminate(terminateCtx)
-	})
-
-	databaseURL, err := container.ConnectionString(ctx, "sslmode=disable")
-	if err != nil {
-		t.Fatalf("ConnectionString() error = %v", err)
-	}
+	databaseURL := testutil.FreshPostgresDatabaseURL(t, ctx)
 
 	dbCfg := config.DatabaseConfig{
 		URL:             databaseURL,
