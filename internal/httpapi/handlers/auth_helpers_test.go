@@ -3,8 +3,10 @@ package handlers
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -50,6 +52,81 @@ func TestDecodeJSONParsesValidBody(t *testing.T) {
 	}
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusOK)
+	}
+}
+
+func TestWriteValidationError(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	validationErr := newValidationErrors()
+	validationErr.add("email", "required")
+
+	writeValidationError(recorder, validationErr)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusBadRequest)
+	}
+
+	var response envelope
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	if response.Error == nil {
+		t.Fatal("response.Error = nil, want error payload")
+	}
+	if response.Error.Code != "validation_failed" || response.Error.Message != "email is required" {
+		t.Fatalf("response.Error = %+v, want code=%q message=%q", response.Error, "validation_failed", "email is required")
+	}
+	wantFields := validationFieldErrors{"email": map[string]any{"required": true}}
+	if !reflect.DeepEqual(response.Error.Fields, wantFields) {
+		t.Fatalf("response.Error.Fields = %+v, want %+v", response.Error.Fields, wantFields)
+	}
+}
+
+func TestValidationHelpers(t *testing.T) {
+	testCases := []struct {
+		name     string
+		validate func() error
+		wantErr  string
+		wantMap  validationFieldErrors
+	}{
+		{name: "register missing username", validate: func() error { return registerRequest{Email: "user@example.com", Password: "Password12345"}.validate() }, wantErr: "username is required", wantMap: validationFieldErrors{"username": map[string]any{"required": true}}},
+		{name: "register invalid username and password", validate: func() error {
+			return registerRequest{Username: "ab", Email: "user@example.com", Password: "short"}.validate()
+		}, wantErr: "request validation failed", wantMap: validationFieldErrors{"username": map[string]any{"minlength": map[string]any{"requiredLength": minUsernameLength, "actualLength": 2}}, "password": map[string]any{"minlength": map[string]any{"requiredLength": minPasswordLength, "actualLength": 5}}}},
+		{name: "register invalid email", validate: func() error {
+			return registerRequest{Username: "user", Email: "invalid", Password: "Password12345"}.validate()
+		}, wantErr: "email must be a valid email address", wantMap: validationFieldErrors{"email": map[string]any{"email": true}}},
+		{name: "login invalid totp", validate: func() error {
+			return loginRequest{Email: "user@example.com", Password: "Password12345", TOTPCode: "12ab"}.validate()
+		}, wantErr: "totp_code format is invalid", wantMap: validationFieldErrors{"totp_code": map[string]any{"pattern": map[string]any{"requiredPattern": `^[0-9]{6}$`}}}},
+		{name: "email only invalid", validate: func() error { return emailRequest{Email: "not-an-email"}.validate() }, wantErr: "email must be a valid email address", wantMap: validationFieldErrors{"email": map[string]any{"email": true}}},
+		{name: "token password missing token", validate: func() error { return tokenPasswordRequest{Password: "Password12345"}.validate() }, wantErr: "token is required", wantMap: validationFieldErrors{"token": map[string]any{"required": true}}},
+		{name: "totp setup missing code", validate: func() error { return enableTOTPRequest{Code: " "}.validate() }, wantErr: "code is required", wantMap: validationFieldErrors{"code": map[string]any{"required": true}}},
+		{name: "passkey missing credential", validate: func() error { return passkeyRegistrationRequest{}.validate() }, wantErr: "credential is required", wantMap: validationFieldErrors{"credential": map[string]any{"required": true}}},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			err := testCase.validate()
+			if err == nil {
+				t.Fatal("validation error = nil, want non-nil")
+			}
+			var validationErr *validationErrors
+			if !errors.As(err, &validationErr) {
+				t.Fatalf("validation error type = %T, want *validationErrors", err)
+			}
+			if validationErr.Error() != testCase.wantErr {
+				t.Fatalf("validation error = %q, want %q", validationErr.Error(), testCase.wantErr)
+			}
+			if !reflect.DeepEqual(validationErr.fieldMap(), testCase.wantMap) {
+				t.Fatalf("validation fields = %+v, want %+v", validationErr.fieldMap(), testCase.wantMap)
+			}
+		})
+	}
+
+	valid := registerRequest{Username: "user", Email: "user@example.com", Password: "Password12345"}
+	if err := valid.validate(); err != nil {
+		t.Fatalf("registerRequest.validate() error = %v, want nil", err)
 	}
 }
 
@@ -101,39 +178,73 @@ func TestHandleAuthErrorMappings(t *testing.T) {
 	}
 }
 
-func TestEnsureDeviceIDUsesCookieAndSetsOneWhenMissing(t *testing.T) {
-	t.Run("existing cookie", func(t *testing.T) {
-		request := httptest.NewRequest(http.MethodGet, "/", nil)
-		request.AddCookie(&http.Cookie{Name: deviceCookieName, Value: "device-123"})
-		recorder := httptest.NewRecorder()
+func TestHandlePasswordLoginErrorMasksCredentialFailures(t *testing.T) {
+	testCases := []struct {
+		name string
+		err  error
+	}{
+		{name: "invalid credentials", err: auth.ErrInvalidCredentials},
+		{name: "locked", err: auth.ErrAccountLocked},
+		{name: "disabled", err: auth.ErrAccountDisabled},
+		{name: "email unverified", err: auth.ErrEmailUnverified},
+	}
 
-		deviceID := ensureDeviceID(recorder, request, true)
-		if deviceID != "device-123" {
-			t.Fatalf("ensureDeviceID() = %q, want existing cookie", deviceID)
-		}
-		if len(recorder.Result().Cookies()) != 0 {
-			t.Fatalf("ensureDeviceID() set unexpected cookies: %v", recorder.Result().Cookies())
-		}
-	})
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			handlePasswordLoginError(recorder, testCase.err)
 
-	t.Run("missing cookie", func(t *testing.T) {
-		request := httptest.NewRequest(http.MethodGet, "/", nil)
-		recorder := httptest.NewRecorder()
+			if recorder.Code != http.StatusUnauthorized {
+				t.Fatalf("status = %d, want %d", recorder.Code, http.StatusUnauthorized)
+			}
 
-		deviceID := ensureDeviceID(recorder, request, true)
-		if strings.TrimSpace(deviceID) == "" {
-			t.Fatal("ensureDeviceID() returned empty device ID")
-		}
+			var response envelope
+			if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+				t.Fatalf("json.Unmarshal() error = %v", err)
+			}
+			if response.Error == nil {
+				t.Fatal("response.Error = nil, want error payload")
+			}
+			if response.Error.Code != "invalid_credentials" || response.Error.Message != standardLoginFailureMessage {
+				t.Fatalf("response.Error = %+v, want code=%q message=%q", response.Error, "invalid_credentials", standardLoginFailureMessage)
+			}
+		})
+	}
+}
 
-		cookies := recorder.Result().Cookies()
-		if len(cookies) != 1 {
-			t.Fatalf("len(cookies) = %d, want 1", len(cookies))
-		}
-		cookie := cookies[0]
-		if cookie.Name != deviceCookieName || cookie.Value != deviceID || !cookie.HttpOnly || !cookie.Secure || cookie.Path != "/" || cookie.SameSite != http.SameSiteLaxMode || cookie.MaxAge != 31536000 {
-			t.Fatalf("cookie = %+v, want configured device cookie", cookie)
-		}
-	})
+func TestHandlePasswordLoginErrorPreservesSecondFactorErrors(t *testing.T) {
+	testCases := []struct {
+		name    string
+		err     error
+		status  int
+		code    string
+		message string
+	}{
+		{name: "totp required", err: auth.ErrTOTPRequired, status: http.StatusUnauthorized, code: "totp_required", message: auth.ErrTOTPRequired.Error()},
+		{name: "invalid totp", err: auth.ErrInvalidTOTP, status: http.StatusUnauthorized, code: "invalid_totp", message: auth.ErrInvalidTOTP.Error()},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			handlePasswordLoginError(recorder, testCase.err)
+
+			if recorder.Code != testCase.status {
+				t.Fatalf("status = %d, want %d", recorder.Code, testCase.status)
+			}
+
+			var response envelope
+			if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+				t.Fatalf("json.Unmarshal() error = %v", err)
+			}
+			if response.Error == nil {
+				t.Fatal("response.Error = nil, want error payload")
+			}
+			if response.Error.Code != testCase.code || response.Error.Message != testCase.message {
+				t.Fatalf("response.Error = %+v, want code=%q message=%q", response.Error, testCase.code, testCase.message)
+			}
+		})
+	}
 }
 
 func TestClientIP(t *testing.T) {
@@ -200,5 +311,58 @@ func TestHandlerMethodsRejectInvalidJSON(t *testing.T) {
 				t.Fatalf("response = %+v, want invalid_json error", response)
 			}
 		})
+	}
+}
+
+func TestHandlerMethodsRejectInvalidPayloads(t *testing.T) {
+	testCases := []struct {
+		name        string
+		handler     func(AuthHandler, http.ResponseWriter, *http.Request)
+		body        string
+		wantMessage string
+		wantFields  validationFieldErrors
+	}{
+		{name: "register multiple invalid fields", handler: AuthHandler.Register, body: `{"username":"ab","email":"invalid","password":"short"}`, wantMessage: "request validation failed", wantFields: validationFieldErrors{"username": map[string]any{"minlength": map[string]any{"requiredLength": float64(minUsernameLength), "actualLength": float64(2)}}, "email": map[string]any{"email": true}, "password": map[string]any{"minlength": map[string]any{"requiredLength": float64(minPasswordLength), "actualLength": float64(5)}}}},
+		{name: "request password reset invalid email", handler: AuthHandler.RequestPasswordReset, body: `{"email":"invalid"}`, wantMessage: "email must be a valid email address", wantFields: validationFieldErrors{"email": map[string]any{"email": true}}},
+		{name: "request account recovery missing email", handler: AuthHandler.RequestAccountRecovery, body: `{"email":""}`, wantMessage: "email is required", wantFields: validationFieldErrors{"email": map[string]any{"required": true}}},
+		{name: "reset password short password", handler: AuthHandler.ResetPassword, body: `{"token":"abc","password":"short"}`, wantMessage: "password must be at least 12 characters", wantFields: validationFieldErrors{"password": map[string]any{"minlength": map[string]any{"requiredLength": float64(minPasswordLength), "actualLength": float64(5)}}}},
+		{name: "recover account missing password", handler: AuthHandler.RecoverAccount, body: `{"token":"abc"}`, wantMessage: "password is required", wantFields: validationFieldErrors{"password": map[string]any{"required": true}}},
+		{name: "enable totp invalid code", handler: AuthHandler.EnableTOTP, body: `{"code":"12ab"}`, wantMessage: "code format is invalid", wantFields: validationFieldErrors{"code": map[string]any{"pattern": map[string]any{"requiredPattern": `^[0-9]{6}$`}}}},
+		{name: "finish passkey registration missing credential", handler: AuthHandler.FinishPasskeyRegistration, body: `{"name":"Laptop key"}`, wantMessage: "credential is required", wantFields: validationFieldErrors{"credential": map[string]any{"required": true}}},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			request := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(testCase.body))
+
+			testCase.handler(AuthHandler{}, recorder, request)
+
+			if recorder.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want %d", recorder.Code, http.StatusBadRequest)
+			}
+
+			var response envelope
+			if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+				t.Fatalf("json.Unmarshal() error = %v", err)
+			}
+			if response.Error == nil {
+				t.Fatal("response.Error = nil, want error payload")
+			}
+			if response.Error.Code != "validation_failed" || response.Error.Message != testCase.wantMessage {
+				t.Fatalf("response.Error = %+v, want code=%q message=%q", response.Error, "validation_failed", testCase.wantMessage)
+			}
+			if !reflect.DeepEqual(response.Error.Fields, testCase.wantFields) {
+				t.Fatalf("response.Error.Fields = %+v, want %+v", response.Error.Fields, testCase.wantFields)
+			}
+		})
+	}
+}
+
+func TestRequireJSONValueAcceptsStructuredJSON(t *testing.T) {
+	credential := json.RawMessage(fmt.Appendf(nil, `{%q:%q}`, "id", "cred"))
+
+	if err := (passkeyRegistrationRequest{Credential: credential}).validate(); err != nil {
+		t.Fatalf("passkeyRegistrationRequest.validate() error = %v, want nil", err)
 	}
 }

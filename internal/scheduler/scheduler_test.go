@@ -63,41 +63,13 @@ func TestLoopRunsJobAndStopsOnCancel(t *testing.T) {
 	}
 }
 
-func TestCleanupRemovesExpiredAndRevokedRecords(t *testing.T) {
+func TestCleanupRemovesExpiredAndUsedTokens(t *testing.T) {
 	ctx := context.Background()
 	db, queries := newSchedulerTestDB(t, ctx)
 
 	user, err := queries.CreateUser(ctx, sqlc.CreateUserParams{Username: "cleanup-user", Email: "cleanup@example.com"})
 	if err != nil {
 		t.Fatalf("CreateUser() error = %v", err)
-	}
-
-	if err := queries.CreateUserSessionRecord(ctx, sqlc.CreateUserSessionRecordParams{
-		Token:    "expired-session",
-		UserID:   user.ID,
-		DeviceID: "device-1",
-		Expiry:   time.Now().UTC().Add(-time.Hour),
-	}); err != nil {
-		t.Fatalf("CreateUserSessionRecord(expired) error = %v", err)
-	}
-	if err := queries.CreateUserSessionRecord(ctx, sqlc.CreateUserSessionRecordParams{
-		Token:    "revoked-session",
-		UserID:   user.ID,
-		DeviceID: "device-2",
-		Expiry:   time.Now().UTC().Add(time.Hour),
-	}); err != nil {
-		t.Fatalf("CreateUserSessionRecord(revoked) error = %v", err)
-	}
-	if err := queries.CreateUserSessionRecord(ctx, sqlc.CreateUserSessionRecordParams{
-		Token:    "active-session",
-		UserID:   user.ID,
-		DeviceID: "device-3",
-		Expiry:   time.Now().UTC().Add(time.Hour),
-	}); err != nil {
-		t.Fatalf("CreateUserSessionRecord(active) error = %v", err)
-	}
-	if _, err := db.ExecContext(ctx, `UPDATE user_sessions SET revoked_at = NOW() WHERE token = 'revoked-session'`); err != nil {
-		t.Fatalf("mark revoked session: %v", err)
 	}
 
 	if _, err := queries.CreateUserToken(ctx, sqlc.CreateUserTokenParams{
@@ -132,8 +104,6 @@ func TestCleanupRemovesExpiredAndRevokedRecords(t *testing.T) {
 	scheduler := &Scheduler{logger: discardLogger(), q: queries}
 	scheduler.cleanup(ctx)
 
-	assertCount(t, ctx, db, `SELECT COUNT(*) FROM user_sessions`)
-	assertCount(t, ctx, db, `SELECT COUNT(*) FROM user_sessions WHERE token = 'active-session'`)
 	assertCount(t, ctx, db, `SELECT COUNT(*) FROM user_tokens`)
 	assertCount(t, ctx, db, `SELECT COUNT(*) FROM user_tokens WHERE token_hash = 'active-token'`)
 }

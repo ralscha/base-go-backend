@@ -111,8 +111,7 @@ func TestMeUnauthorizedWithoutSession(t *testing.T) {
 
 func TestMeReturnsCurrentUser(t *testing.T) {
 	ctx := context.Background()
-	db, queries, service := newHandlerAuthTestEnv(t, ctx)
-	_ = db
+	_, queries, service := newHandlerAuthTestEnv(t, ctx)
 
 	user, err := queries.CreateUser(ctx, sqlc.CreateUserParams{Username: "me-user", Email: "me@example.com"})
 	if err != nil {
@@ -236,9 +235,39 @@ func TestRequestPasswordResetAcceptedAndEnqueuesEmail(t *testing.T) {
 	}
 }
 
+func TestRequestPasswordResetAcceptedForUnknownEmail(t *testing.T) {
+	ctx := context.Background()
+	_, queries, service := newHandlerAuthTestEnv(t, ctx)
+
+	handler := AuthHandler{Service: service}
+	req := httptest.NewRequest(http.MethodPost, "/password-reset/request", strings.NewReader(`{"email":"missing@example.com"}`))
+	recorder := httptest.NewRecorder()
+	handler.RequestPasswordReset(recorder, req)
+
+	if recorder.Code != http.StatusAccepted {
+		body, _ := io.ReadAll(recorder.Body)
+		t.Fatalf("status = %d, want %d, body=%s", recorder.Code, http.StatusAccepted, string(body))
+	}
+	var payload envelope
+	if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	if payload.Data.(map[string]any)["requested"] != true {
+		t.Fatalf("payload = %+v, want requested=true", payload)
+	}
+
+	emails, err := queries.ListPendingEmails(ctx, 10)
+	if err != nil {
+		t.Fatalf("ListPendingEmails() error = %v", err)
+	}
+	if len(emails) != 0 {
+		t.Fatalf("emails = %+v, want no queued emails", emails)
+	}
+}
+
 func TestRegisterAndLoginFlow(t *testing.T) {
 	ctx := context.Background()
-	db, queries, service := newHandlerAuthTestEnv(t, ctx)
+	_, queries, service := newHandlerAuthTestEnv(t, ctx)
 
 	sessions := scs.New()
 	handler := AuthHandler{Service: service, Sessions: sessions, LoginRateLimiter: service.RateLimiter()}
@@ -289,7 +318,7 @@ func TestRegisterAndLoginFlow(t *testing.T) {
 		t.Fatalf("emails = %+v, want one verify-email message", emails)
 	}
 
-	loginResp, err := client.Post(server.URL+"/login", "application/json", strings.NewReader(`{"identifier":"handler-user@example.com","password":"ValidPassword123"}`))
+	loginResp, err := client.Post(server.URL+"/login", "application/json", strings.NewReader(`{"email":"handler-user@example.com","password":"ValidPassword123"}`))
 	if err != nil {
 		t.Fatalf("POST /login error = %v", err)
 	}
@@ -327,8 +356,6 @@ func TestRegisterAndLoginFlow(t *testing.T) {
 		t.Fatalf("me payload = %+v, want current session user", mePayload)
 	}
 
-	assertHandlerQueryCount(t, ctx, db, `SELECT COUNT(*) FROM user_sessions WHERE user_id = $1 AND revoked_at IS NULL`, 1, user.ID)
-	assertHandlerQueryCount(t, ctx, db, `SELECT COUNT(*) FROM user_sessions WHERE user_id = $1 AND device_id <> ''`, 1, user.ID)
 }
 
 func TestLoginReturnsTOTPRequired(t *testing.T) {
@@ -350,8 +377,8 @@ func TestLoginReturnsTOTPRequired(t *testing.T) {
 	if err != nil {
 		t.Fatalf("HashPassword() error = %v", err)
 	}
-	if _, err := queries.UpsertPasswordCredential(ctx, sqlc.UpsertPasswordCredentialParams{UserID: user.ID, PasswordHash: hash}); err != nil {
-		t.Fatalf("UpsertPasswordCredential() error = %v", err)
+	if _, err := queries.SetUserPasswordHash(ctx, sqlc.SetUserPasswordHashParams{ID: user.ID, PasswordHash: sql.NullString{String: hash, Valid: true}}); err != nil {
+		t.Fatalf("SetUserPasswordHash() error = %v", err)
 	}
 	if err := queries.MarkUserEmailVerified(ctx, user.ID); err != nil {
 		t.Fatalf("MarkUserEmailVerified() error = %v", err)
@@ -364,14 +391,14 @@ func TestLoginReturnsTOTPRequired(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GenerateCode() error = %v", err)
 	}
-	if _, err := service.ConfirmTOTPSetup(ctx, user.ID, code); err != nil {
+	if err := service.ConfirmTOTPSetup(ctx, user.ID, code); err != nil {
 		t.Fatalf("ConfirmTOTPSetup() error = %v", err)
 	}
 
 	sessions := scs.New()
 	handler := AuthHandler{Service: service, Sessions: sessions, LoginRateLimiter: service.RateLimiter()}
 	recorder := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(`{"identifier":"login-totp@example.com","password":"ValidPassword123"}`))
+	req := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(`{"email":"login-totp@example.com","password":"ValidPassword123"}`))
 	handler.Login(recorder, req)
 
 	if recorder.Code != http.StatusUnauthorized {
@@ -385,6 +412,94 @@ func TestLoginReturnsTOTPRequired(t *testing.T) {
 	errorPayload := payload.Error
 	if errorPayload == nil || errorPayload.Code != "totp_required" {
 		t.Fatalf("payload = %+v, want totp_required error", payload)
+	}
+}
+
+func TestLoginMasksCredentialAndAccountStateFailures(t *testing.T) {
+	testCases := []struct {
+		name  string
+		setup func(t *testing.T, ctx context.Context, db *sql.DB, queries *sqlc.Queries) (string, string)
+	}{
+		{
+			name: "unknown account",
+			setup: func(t *testing.T, ctx context.Context, db *sql.DB, queries *sqlc.Queries) (string, string) {
+				t.Helper()
+				return "missing@example.com", "WrongPassword123"
+			},
+		},
+		{
+			name: "wrong password",
+			setup: func(t *testing.T, ctx context.Context, db *sql.DB, queries *sqlc.Queries) (string, string) {
+				t.Helper()
+				user := createHandlerPasswordUser(t, ctx, queries, "wrong-pass-handler", "wrong-pass-handler@example.com", "ValidPassword123", true)
+				return user.Email, "WrongPassword123"
+			},
+		},
+		{
+			name: "disabled account",
+			setup: func(t *testing.T, ctx context.Context, db *sql.DB, queries *sqlc.Queries) (string, string) {
+				t.Helper()
+				user := createHandlerPasswordUser(t, ctx, queries, "disabled-handler", "disabled-handler@example.com", "ValidPassword123", true)
+				if _, err := db.ExecContext(ctx, `UPDATE users SET is_active = FALSE WHERE id = $1`, user.ID); err != nil {
+					t.Fatalf("disable user error = %v", err)
+				}
+				return user.Email, "ValidPassword123"
+			},
+		},
+		{
+			name: "locked account",
+			setup: func(t *testing.T, ctx context.Context, db *sql.DB, queries *sqlc.Queries) (string, string) {
+				t.Helper()
+				user := createHandlerPasswordUser(t, ctx, queries, "locked-handler", "locked-handler@example.com", "ValidPassword123", true)
+				if _, err := db.ExecContext(ctx, `UPDATE users SET locked_until = NOW() + INTERVAL '1 hour' WHERE id = $1`, user.ID); err != nil {
+					t.Fatalf("lock user error = %v", err)
+				}
+				return user.Email, "ValidPassword123"
+			},
+		},
+		{
+			name: "unverified account",
+			setup: func(t *testing.T, ctx context.Context, db *sql.DB, queries *sqlc.Queries) (string, string) {
+				t.Helper()
+				user := createHandlerPasswordUser(t, ctx, queries, "unverified-handler", "unverified-handler@example.com", "ValidPassword123", false)
+				return user.Email, "ValidPassword123"
+			},
+		},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			ctx := context.Background()
+			db, queries, service := newHandlerAuthTestEnv(t, ctx)
+			email, password := testCase.setup(t, ctx, db, queries)
+
+			sessions := scs.New()
+			handler := AuthHandler{Service: service, Sessions: sessions, LoginRateLimiter: service.RateLimiter()}
+			server := httptest.NewServer(sessions.LoadAndSave(http.HandlerFunc(handler.Login)))
+			defer server.Close()
+
+			resp, err := http.Post(server.URL, "application/json", strings.NewReader(`{"email":"`+email+`","password":"`+password+`"}`))
+			if err != nil {
+				t.Fatalf("POST /login error = %v", err)
+			}
+			defer func() { _ = resp.Body.Close() }()
+
+			if resp.StatusCode != http.StatusUnauthorized {
+				body, _ := io.ReadAll(resp.Body)
+				t.Fatalf("status = %d, want %d, body=%s", resp.StatusCode, http.StatusUnauthorized, string(body))
+			}
+
+			var payload envelope
+			if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+				t.Fatalf("Decode(/login) error = %v", err)
+			}
+			if payload.Error == nil {
+				t.Fatal("payload.Error = nil, want error payload")
+			}
+			if payload.Error.Code != "invalid_credentials" || payload.Error.Message != standardLoginFailureMessage {
+				t.Fatalf("payload.Error = %+v, want code=%q message=%q", payload.Error, "invalid_credentials", standardLoginFailureMessage)
+			}
+		})
 	}
 }
 
@@ -614,7 +729,7 @@ func TestBeginPasskeyLoginStoresSessionAndFinishRequiresSession(t *testing.T) {
 
 func TestResetPasswordSuccess(t *testing.T) {
 	ctx := context.Background()
-	db, queries, service := newHandlerAuthTestEnv(t, ctx)
+	_, queries, service := newHandlerAuthTestEnv(t, ctx)
 
 	user, err := queries.CreateUser(ctx, sqlc.CreateUserParams{Username: "reset-handler-success", Email: "reset-success@example.com"})
 	if err != nil {
@@ -624,8 +739,8 @@ func TestResetPasswordSuccess(t *testing.T) {
 	if err != nil {
 		t.Fatalf("HashPassword() error = %v", err)
 	}
-	if _, err := queries.UpsertPasswordCredential(ctx, sqlc.UpsertPasswordCredentialParams{UserID: user.ID, PasswordHash: passwordHash}); err != nil {
-		t.Fatalf("UpsertPasswordCredential() error = %v", err)
+	if _, err := queries.SetUserPasswordHash(ctx, sqlc.SetUserPasswordHashParams{ID: user.ID, PasswordHash: sql.NullString{String: passwordHash, Valid: true}}); err != nil {
+		t.Fatalf("SetUserPasswordHash() error = %v", err)
 	}
 	plainToken, tokenHash, err := auth.NewToken()
 	if err != nil {
@@ -634,13 +749,6 @@ func TestResetPasswordSuccess(t *testing.T) {
 	if _, err := queries.CreateUserToken(ctx, sqlc.CreateUserTokenParams{UserID: user.ID, Kind: sqlc.TokenKindPasswordReset, TokenHash: tokenHash, ExpiresAt: time.Now().UTC().Add(time.Hour)}); err != nil {
 		t.Fatalf("CreateUserToken() error = %v", err)
 	}
-	if err := queries.CreateUserSessionRecord(ctx, sqlc.CreateUserSessionRecordParams{Token: "handler-reset-token", UserID: user.ID, DeviceID: "device-1", Expiry: time.Now().UTC().Add(time.Hour)}); err != nil {
-		t.Fatalf("CreateUserSessionRecord() error = %v", err)
-	}
-	if _, err := db.ExecContext(ctx, `INSERT INTO sessions (token, data, expiry) VALUES ($1, $2, $3)`, "handler-reset-token", []byte("session"), time.Now().UTC().Add(time.Hour)); err != nil {
-		t.Fatalf("insert sessions row error = %v", err)
-	}
-
 	handler := AuthHandler{Service: service}
 	req := httptest.NewRequest(http.MethodPost, "/password-reset/confirm", strings.NewReader(`{"token":"`+plainToken+`","password":"UpdatedPassword123"}`))
 	recorder := httptest.NewRecorder()
@@ -658,11 +766,11 @@ func TestResetPasswordSuccess(t *testing.T) {
 		t.Fatalf("payload = %+v, want password_reset=true", payload)
 	}
 
-	credential, err := queries.GetPasswordCredentialByUserID(ctx, user.ID)
+	credential, err := queries.GetUserWithPasswordByEmail(ctx, user.Email)
 	if err != nil {
-		t.Fatalf("GetPasswordCredentialByUserID() error = %v", err)
+		t.Fatalf("GetUserWithPasswordByEmail() error = %v", err)
 	}
-	match, err := auth.ComparePassword("UpdatedPassword123", credential.PasswordHash)
+	match, err := auth.ComparePassword("UpdatedPassword123", credential.PasswordHash.String)
 	if err != nil {
 		t.Fatalf("ComparePassword() error = %v", err)
 	}
@@ -740,9 +848,8 @@ func TestTOTPHandlerFlow(t *testing.T) {
 	if err := json.NewDecoder(enableResp.Body).Decode(&enablePayload); err != nil {
 		t.Fatalf("Decode(/enable) error = %v", err)
 	}
-	recoveryCodes := enablePayload.Data.(map[string]any)["recovery_codes"].([]any)
-	if len(recoveryCodes) != 10 {
-		t.Fatalf("len(recovery_codes) = %d, want 10", len(recoveryCodes))
+	if enablePayload.Data.(map[string]any)["totp_enabled"] != true {
+		t.Fatalf("enable payload = %+v, want totp_enabled=true", enablePayload)
 	}
 
 	configRow, err := queries.GetTotpConfigurationByUserID(ctx, user.ID)
@@ -790,8 +897,8 @@ func TestRequestAccountRecoveryAcceptedAndRecoverAccountSuccess(t *testing.T) {
 	if err != nil {
 		t.Fatalf("HashPassword() error = %v", err)
 	}
-	if _, err := queries.UpsertPasswordCredential(ctx, sqlc.UpsertPasswordCredentialParams{UserID: user.ID, PasswordHash: hash}); err != nil {
-		t.Fatalf("UpsertPasswordCredential() error = %v", err)
+	if _, err := queries.SetUserPasswordHash(ctx, sqlc.SetUserPasswordHashParams{ID: user.ID, PasswordHash: sql.NullString{String: hash, Valid: true}}); err != nil {
+		t.Fatalf("SetUserPasswordHash() error = %v", err)
 	}
 	if _, err := queries.UpsertTotpConfiguration(ctx, sqlc.UpsertTotpConfigurationParams{UserID: user.ID, SecretCiphertext: []byte("cipher"), SecretNonce: []byte("nonce"), EnabledAt: sql.NullTime{Time: time.Now().UTC(), Valid: true}}); err != nil {
 		t.Fatalf("UpsertTotpConfiguration() error = %v", err)
@@ -839,16 +946,46 @@ func TestRequestAccountRecoveryAcceptedAndRecoverAccountSuccess(t *testing.T) {
 	if _, err := queries.GetTotpConfigurationByUserID(ctx, user.ID); !errors.Is(err, sql.ErrNoRows) {
 		t.Fatalf("GetTotpConfigurationByUserID() after recover error = %v, want sql.ErrNoRows", err)
 	}
-	credential, err := queries.GetPasswordCredentialByUserID(ctx, user.ID)
+	credential, err := queries.GetUserWithPasswordByEmail(ctx, user.Email)
 	if err != nil {
-		t.Fatalf("GetPasswordCredentialByUserID() error = %v", err)
+		t.Fatalf("GetUserWithPasswordByEmail() error = %v", err)
 	}
-	match, err := auth.ComparePassword("RecoveredPassword123", credential.PasswordHash)
+	match, err := auth.ComparePassword("RecoveredPassword123", credential.PasswordHash.String)
 	if err != nil {
 		t.Fatalf("ComparePassword() error = %v", err)
 	}
 	if !match {
 		t.Fatal("expected recovered password to be stored")
+	}
+}
+
+func TestRequestAccountRecoveryAcceptedForUnknownEmail(t *testing.T) {
+	ctx := context.Background()
+	_, queries, service := newHandlerAuthTestEnv(t, ctx)
+
+	handler := AuthHandler{Service: service}
+	requestResp := httptest.NewRecorder()
+	requestReq := httptest.NewRequest(http.MethodPost, "/account-recovery/request", strings.NewReader(`{"email":"missing@example.com"}`))
+	handler.RequestAccountRecovery(requestResp, requestReq)
+
+	if requestResp.Code != http.StatusAccepted {
+		body, _ := io.ReadAll(requestResp.Body)
+		t.Fatalf("request status = %d, want %d, body=%s", requestResp.Code, http.StatusAccepted, string(body))
+	}
+	var payload envelope
+	if err := json.Unmarshal(requestResp.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	if payload.Data.(map[string]any)["requested"] != true {
+		t.Fatalf("payload = %+v, want requested=true", payload)
+	}
+
+	emails, err := queries.ListPendingEmails(ctx, 10)
+	if err != nil {
+		t.Fatalf("ListPendingEmails() error = %v", err)
+	}
+	if len(emails) != 0 {
+		t.Fatalf("emails = %+v, want no queued emails", emails)
 	}
 }
 
@@ -887,6 +1024,29 @@ func newHandlerAuthTestEnv(t *testing.T, ctx context.Context) (*sql.DB, *sqlc.Qu
 	return db, sqlc.New(db), service
 }
 
+func createHandlerPasswordUser(t *testing.T, ctx context.Context, queries *sqlc.Queries, username, email, password string, verified bool) sqlc.User {
+	t.Helper()
+
+	user, err := queries.CreateUser(ctx, sqlc.CreateUserParams{Username: username, Email: email})
+	if err != nil {
+		t.Fatalf("CreateUser() error = %v", err)
+	}
+	hash, err := auth.HashPassword(password)
+	if err != nil {
+		t.Fatalf("HashPassword() error = %v", err)
+	}
+	if _, err := queries.SetUserPasswordHash(ctx, sqlc.SetUserPasswordHashParams{ID: user.ID, PasswordHash: sql.NullString{String: hash, Valid: true}}); err != nil {
+		t.Fatalf("SetUserPasswordHash() error = %v", err)
+	}
+	if verified {
+		if err := queries.MarkUserEmailVerified(ctx, user.ID); err != nil {
+			t.Fatalf("MarkUserEmailVerified() error = %v", err)
+		}
+	}
+
+	return user
+}
+
 func assertHandlerQueryCount(t *testing.T, ctx context.Context, db *sql.DB, query string, want int, args ...any) {
 	t.Helper()
 
@@ -909,6 +1069,16 @@ func assertErrorCode(t *testing.T, body []byte, wantCode string) {
 	if payload.Error == nil || payload.Error.Code != wantCode {
 		t.Fatalf("payload = %+v, want error code %q", payload, wantCode)
 	}
+}
+
+func responseHasCookie(resp *http.Response, name string) bool {
+	for _, cookie := range resp.Cookies() {
+		if cookie.Name == name {
+			return true
+		}
+	}
+
+	return false
 }
 
 func withChiURLParam(r *http.Request, key, value string) *http.Request {

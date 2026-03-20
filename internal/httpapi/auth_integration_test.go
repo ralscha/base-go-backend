@@ -42,8 +42,8 @@ func TestAccountRecoveryFlowReactivatesUserAndClearsTOTP(t *testing.T) {
 	if err != nil {
 		t.Fatalf("HashPassword() error = %v", err)
 	}
-	if _, err := env.queries.UpsertPasswordCredential(ctx, sqlc.UpsertPasswordCredentialParams{UserID: user.ID, PasswordHash: passwordBefore}); err != nil {
-		t.Fatalf("UpsertPasswordCredential() error = %v", err)
+	if _, err := env.queries.SetUserPasswordHash(ctx, sqlc.SetUserPasswordHashParams{ID: user.ID, PasswordHash: sql.NullString{String: passwordBefore, Valid: true}}); err != nil {
+		t.Fatalf("SetUserPasswordHash() error = %v", err)
 	}
 
 	setup, err := env.authService.BeginTOTPSetup(ctx, user.ID)
@@ -54,7 +54,7 @@ func TestAccountRecoveryFlowReactivatesUserAndClearsTOTP(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GenerateCode() error = %v", err)
 	}
-	if _, err := env.authService.ConfirmTOTPSetup(ctx, user.ID, code); err != nil {
+	if err := env.authService.ConfirmTOTPSetup(ctx, user.ID, code); err != nil {
 		t.Fatalf("ConfirmTOTPSetup() error = %v", err)
 	}
 
@@ -130,11 +130,11 @@ func TestAccountRecoveryFlowReactivatesUserAndClearsTOTP(t *testing.T) {
 		t.Fatal("expected email to be verified after recovery")
 	}
 
-	passwordCredential, err := env.queries.GetPasswordCredentialByUserID(ctx, user.ID)
+	passwordCredential, err := env.queries.GetUserWithPasswordByEmail(ctx, user.Email)
 	if err != nil {
-		t.Fatalf("GetPasswordCredentialByUserID() error = %v", err)
+		t.Fatalf("GetUserWithPasswordByEmail() error = %v", err)
 	}
-	match, err := auth.ComparePassword("RecoveredPassword123", passwordCredential.PasswordHash)
+	match, err := auth.ComparePassword("RecoveredPassword123", passwordCredential.PasswordHash.String)
 	if err != nil {
 		t.Fatalf("ComparePassword() error = %v", err)
 	}
@@ -172,8 +172,8 @@ func TestAccountRecoveryTokenCannotBeReused(t *testing.T) {
 	if err != nil {
 		t.Fatalf("HashPassword() error = %v", err)
 	}
-	if _, err := env.queries.UpsertPasswordCredential(ctx, sqlc.UpsertPasswordCredentialParams{UserID: user.ID, PasswordHash: passwordBefore}); err != nil {
-		t.Fatalf("UpsertPasswordCredential() error = %v", err)
+	if _, err := env.queries.SetUserPasswordHash(ctx, sqlc.SetUserPasswordHashParams{ID: user.ID, PasswordHash: sql.NullString{String: passwordBefore, Valid: true}}); err != nil {
+		t.Fatalf("SetUserPasswordHash() error = %v", err)
 	}
 
 	requestRecoveryResp := postJSON(t, env.server.URL+"/api/v1/auth/account-recovery/request", map[string]string{"email": user.Email})
@@ -229,11 +229,11 @@ func TestAccountRecoveryTokenCannotBeReused(t *testing.T) {
 		t.Fatalf("error code = %q, want %q", errorBody.Error.Code, "request_failed")
 	}
 
-	passwordCredential, err := env.queries.GetPasswordCredentialByUserID(ctx, user.ID)
+	passwordCredential, err := env.queries.GetUserWithPasswordByEmail(ctx, user.Email)
 	if err != nil {
-		t.Fatalf("GetPasswordCredentialByUserID() error = %v", err)
+		t.Fatalf("GetUserWithPasswordByEmail() error = %v", err)
 	}
-	match, err := auth.ComparePassword("RecoveredPassword123", passwordCredential.PasswordHash)
+	match, err := auth.ComparePassword("RecoveredPassword123", passwordCredential.PasswordHash.String)
 	if err != nil {
 		t.Fatalf("ComparePassword() error = %v", err)
 	}
@@ -254,8 +254,8 @@ func TestExpiredAccountRecoveryTokenIsRejected(t *testing.T) {
 	if err != nil {
 		t.Fatalf("HashPassword() error = %v", err)
 	}
-	if _, err := env.queries.UpsertPasswordCredential(ctx, sqlc.UpsertPasswordCredentialParams{UserID: user.ID, PasswordHash: passwordBefore}); err != nil {
-		t.Fatalf("UpsertPasswordCredential() error = %v", err)
+	if _, err := env.queries.SetUserPasswordHash(ctx, sqlc.SetUserPasswordHashParams{ID: user.ID, PasswordHash: sql.NullString{String: passwordBefore, Valid: true}}); err != nil {
+		t.Fatalf("SetUserPasswordHash() error = %v", err)
 	}
 
 	requestRecoveryResp := postJSON(t, env.server.URL+"/api/v1/auth/account-recovery/request", map[string]string{"email": user.Email})
@@ -309,11 +309,11 @@ func TestExpiredAccountRecoveryTokenIsRejected(t *testing.T) {
 		t.Fatalf("error code = %q, want %q", errorBody.Error.Code, "request_failed")
 	}
 
-	passwordCredential, err := env.queries.GetPasswordCredentialByUserID(ctx, user.ID)
+	passwordCredential, err := env.queries.GetUserWithPasswordByEmail(ctx, user.Email)
 	if err != nil {
-		t.Fatalf("GetPasswordCredentialByUserID() error = %v", err)
+		t.Fatalf("GetUserWithPasswordByEmail() error = %v", err)
 	}
-	match, err := auth.ComparePassword("InitialPassword123", passwordCredential.PasswordHash)
+	match, err := auth.ComparePassword("InitialPassword123", passwordCredential.PasswordHash.String)
 	if err != nil {
 		t.Fatalf("ComparePassword() error = %v", err)
 	}
@@ -335,8 +335,8 @@ func TestFailedPasswordLoginsUseUserCounterForLockout(t *testing.T) {
 	if err != nil {
 		t.Fatalf("HashPassword() error = %v", err)
 	}
-	if _, err := env.queries.UpsertPasswordCredential(ctx, sqlc.UpsertPasswordCredentialParams{UserID: user.ID, PasswordHash: passwordHash}); err != nil {
-		t.Fatalf("UpsertPasswordCredential() error = %v", err)
+	if _, err := env.queries.SetUserPasswordHash(ctx, sqlc.SetUserPasswordHashParams{ID: user.ID, PasswordHash: sql.NullString{String: passwordHash, Valid: true}}); err != nil {
+		t.Fatalf("SetUserPasswordHash() error = %v", err)
 	}
 
 	if _, err := env.db.ExecContext(ctx, `
@@ -349,10 +349,10 @@ func TestFailedPasswordLoginsUseUserCounterForLockout(t *testing.T) {
 
 	for attempt := 1; attempt <= 5; attempt++ {
 		_, err := env.authService.LoginWithPassword(ctx, auth.LoginInput{
-			Identifier: user.Email,
-			Password:   "WrongPassword123",
-			IPAddress:  "203.0.113.10",
-			UserAgent:  "integration-test",
+			Email:     user.Email,
+			Password:  "WrongPassword123",
+			IPAddress: "203.0.113.10",
+			UserAgent: "integration-test",
 		})
 		if !errors.Is(err, auth.ErrInvalidCredentials) {
 			t.Fatalf("attempt %d LoginWithPassword() error = %v, want %v", attempt, err, auth.ErrInvalidCredentials)
@@ -387,8 +387,8 @@ func TestPasswordLoginPersistsSessionForAuthenticatedRoutes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("HashPassword() error = %v", err)
 	}
-	if _, err := env.queries.UpsertPasswordCredential(ctx, sqlc.UpsertPasswordCredentialParams{UserID: user.ID, PasswordHash: passwordHash}); err != nil {
-		t.Fatalf("UpsertPasswordCredential() error = %v", err)
+	if _, err := env.queries.SetUserPasswordHash(ctx, sqlc.SetUserPasswordHashParams{ID: user.ID, PasswordHash: sql.NullString{String: passwordHash, Valid: true}}); err != nil {
+		t.Fatalf("SetUserPasswordHash() error = %v", err)
 	}
 
 	if _, err := env.db.ExecContext(ctx, `
@@ -406,8 +406,8 @@ func TestPasswordLoginPersistsSessionForAuthenticatedRoutes(t *testing.T) {
 	client := &http.Client{Jar: jar}
 
 	loginBody, err := json.Marshal(map[string]string{
-		"identifier": user.Email,
-		"password":   "CorrectPassword123",
+		"email":    user.Email,
+		"password": "CorrectPassword123",
 	})
 	if err != nil {
 		t.Fatalf("json.Marshal(login payload) error = %v", err)
@@ -625,8 +625,8 @@ func TestOAuthLinkAddsProviderToCurrentUser(t *testing.T) {
 	if err != nil {
 		t.Fatalf("HashPassword() error = %v", err)
 	}
-	if _, err := env.queries.UpsertPasswordCredential(ctx, sqlc.UpsertPasswordCredentialParams{UserID: user.ID, PasswordHash: passwordHash}); err != nil {
-		t.Fatalf("UpsertPasswordCredential() error = %v", err)
+	if _, err := env.queries.SetUserPasswordHash(ctx, sqlc.SetUserPasswordHashParams{ID: user.ID, PasswordHash: sql.NullString{String: passwordHash, Valid: true}}); err != nil {
+		t.Fatalf("SetUserPasswordHash() error = %v", err)
 	}
 	if err := env.queries.MarkUserEmailVerified(ctx, user.ID); err != nil {
 		t.Fatalf("MarkUserEmailVerified() error = %v", err)
@@ -641,8 +641,8 @@ func TestOAuthLinkAddsProviderToCurrentUser(t *testing.T) {
 
 	client := newCookieClient(t)
 	loginBody, err := json.Marshal(map[string]string{
-		"identifier": user.Email,
-		"password":   "LinkedPassword123",
+		"email":    user.Email,
+		"password": "LinkedPassword123",
 	})
 	if err != nil {
 		t.Fatalf("json.Marshal(login payload) error = %v", err)
@@ -745,8 +745,8 @@ func TestOAuthLinkConflictWhenIdentityBelongsToAnotherUser(t *testing.T) {
 	if err != nil {
 		t.Fatalf("HashPassword() error = %v", err)
 	}
-	if _, err := env.queries.UpsertPasswordCredential(ctx, sqlc.UpsertPasswordCredentialParams{UserID: user.ID, PasswordHash: passwordHash}); err != nil {
-		t.Fatalf("UpsertPasswordCredential() error = %v", err)
+	if _, err := env.queries.SetUserPasswordHash(ctx, sqlc.SetUserPasswordHashParams{ID: user.ID, PasswordHash: sql.NullString{String: passwordHash, Valid: true}}); err != nil {
+		t.Fatalf("SetUserPasswordHash() error = %v", err)
 	}
 	if err := env.queries.MarkUserEmailVerified(ctx, user.ID); err != nil {
 		t.Fatalf("MarkUserEmailVerified() error = %v", err)
@@ -761,8 +761,8 @@ func TestOAuthLinkConflictWhenIdentityBelongsToAnotherUser(t *testing.T) {
 
 	client := newCookieClient(t)
 	loginBody, err := json.Marshal(map[string]string{
-		"identifier": user.Email,
-		"password":   "LinkedPassword123",
+		"email":    user.Email,
+		"password": "LinkedPassword123",
 	})
 	if err != nil {
 		t.Fatalf("json.Marshal(login payload) error = %v", err)

@@ -77,7 +77,7 @@ func (s *Service) BeginPasskeyLogin() (*protocol.CredentialAssertion, []byte, er
 	return options, sessionJSON, nil
 }
 
-func (s *Service) FinishPasskeyLogin(ctx context.Context, sessionJSON, credentialJSON []byte, totpCode, recoveryCode, userAgent, ipAddress string) (SessionPrincipal, error) {
+func (s *Service) FinishPasskeyLogin(ctx context.Context, sessionJSON, credentialJSON []byte, totpCode, userAgent, ipAddress string) (SessionPrincipal, error) {
 	session, err := decodePasskeySession(sessionJSON)
 	if err != nil {
 		return SessionPrincipal{}, err
@@ -95,7 +95,7 @@ func (s *Service) FinishPasskeyLogin(ctx context.Context, sessionJSON, credentia
 		return SessionPrincipal{}, errors.New("unexpected passkey user type")
 	}
 
-	if err := s.validateSecondFactor(ctx, user.user.ID, totpCode, recoveryCode); err != nil {
+	if err := s.validateSecondFactor(ctx, user.user.ID, totpCode); err != nil {
 		return SessionPrincipal{}, err
 	}
 	if err := s.queries.UpdateUserLastLogin(ctx, user.user.ID); err != nil {

@@ -3,6 +3,7 @@ CREATE TABLE IF NOT EXISTS users (
     id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     username TEXT NOT NULL UNIQUE,
     email TEXT NOT NULL UNIQUE,
+    password_hash TEXT,
     email_verified_at TIMESTAMPTZ,
     last_login_at TIMESTAMPTZ,
     last_seen_at TIMESTAMPTZ,
@@ -11,14 +12,6 @@ CREATE TABLE IF NOT EXISTS users (
     disabled_at TIMESTAMPTZ,
     failed_login_count INTEGER NOT NULL DEFAULT 0,
     locked_until TIMESTAMPTZ,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
-CREATE TABLE IF NOT EXISTS password_credentials (
-    id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    user_id BIGINT NOT NULL UNIQUE REFERENCES users (id) ON DELETE CASCADE,
-    password_hash TEXT NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -63,15 +56,6 @@ CREATE TABLE IF NOT EXISTS totp_configurations (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE TABLE IF NOT EXISTS totp_recovery_codes (
-    id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    user_id BIGINT NOT NULL REFERENCES users (id) ON DELETE CASCADE,
-    code_hash TEXT NOT NULL,
-    used_at TIMESTAMPTZ,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    UNIQUE (user_id, code_hash)
-);
-
 CREATE TYPE token_kind AS ENUM ('password_reset', 'email_verification', 'account_recovery');
 
 CREATE TABLE IF NOT EXISTS user_tokens (
@@ -88,16 +72,6 @@ CREATE TABLE IF NOT EXISTS sessions (
     token TEXT PRIMARY KEY,
     data BYTEA NOT NULL,
     expiry TIMESTAMPTZ NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS user_sessions (
-    token TEXT PRIMARY KEY,
-    user_id BIGINT NOT NULL REFERENCES users (id) ON DELETE CASCADE,
-    device_id TEXT NOT NULL,
-    expiry TIMESTAMPTZ NOT NULL,
-    revoked_at TIMESTAMPTZ,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE TABLE IF NOT EXISTS roles (
@@ -140,9 +114,6 @@ CREATE TABLE IF NOT EXISTS scheduled_jobs (
 
 CREATE INDEX IF NOT EXISTS idx_sessions_expiry ON sessions (expiry);
 CREATE INDEX IF NOT EXISTS idx_passkey_credentials_user_id ON passkey_credentials (user_id);
-CREATE INDEX IF NOT EXISTS idx_user_sessions_user_device ON user_sessions (user_id, device_id) WHERE revoked_at IS NULL;
-CREATE INDEX IF NOT EXISTS idx_user_sessions_revoked_at ON user_sessions (revoked_at) WHERE revoked_at IS NOT NULL;
-CREATE INDEX IF NOT EXISTS idx_user_sessions_expiry ON user_sessions (expiry);
 CREATE INDEX IF NOT EXISTS idx_user_tokens_expires_at ON user_tokens (expires_at) WHERE used_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_user_tokens_used_at ON user_tokens (used_at) WHERE used_at IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_email_outbox_available_at ON email_outbox (available_at) WHERE sent_at IS NULL;
@@ -165,10 +136,6 @@ CREATE TRIGGER trg_users_updated_at
     BEFORE UPDATE ON users
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
-CREATE TRIGGER trg_password_credentials_updated_at
-    BEFORE UPDATE ON password_credentials
-    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
-
 CREATE TRIGGER trg_passkey_credentials_updated_at
     BEFORE UPDATE ON passkey_credentials
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
@@ -179,10 +146,6 @@ CREATE TRIGGER trg_oauth_accounts_updated_at
 
 CREATE TRIGGER trg_totp_configurations_updated_at
     BEFORE UPDATE ON totp_configurations
-    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
-
-CREATE TRIGGER trg_user_sessions_updated_at
-    BEFORE UPDATE ON user_sessions
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
 CREATE TRIGGER trg_email_outbox_updated_at
@@ -198,14 +161,11 @@ DROP TABLE IF EXISTS scheduled_jobs;
 DROP TABLE IF EXISTS email_outbox;
 DROP TABLE IF EXISTS user_roles;
 DROP TABLE IF EXISTS roles;
-DROP TABLE IF EXISTS user_sessions;
 DROP TABLE IF EXISTS sessions;
 DROP TABLE IF EXISTS user_tokens;
 DROP TYPE IF EXISTS token_kind;
-DROP TABLE IF EXISTS totp_recovery_codes;
 DROP TABLE IF EXISTS totp_configurations;
 DROP TABLE IF EXISTS passkey_credentials;
 DROP TABLE IF EXISTS oauth_accounts;
-DROP TABLE IF EXISTS password_credentials;
 DROP TABLE IF EXISTS users;
 DROP FUNCTION IF EXISTS set_updated_at;

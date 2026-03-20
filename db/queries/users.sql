@@ -13,10 +13,11 @@ SELECT *
 FROM users
 WHERE email = $1;
 
--- name: GetUserByUsername :one
+-- name: GetUserWithPasswordByEmail :one
 SELECT *
 FROM users
-WHERE username = $1;
+WHERE email = $1
+  AND password_hash IS NOT NULL;
 
 -- name: GetUserByID :one
 SELECT *

@@ -8,22 +8,19 @@ import (
 	"net"
 	"net/http"
 	"strings"
-	"time"
 
 	"base/internal/auth"
 
 	"github.com/alexedwards/scs/v2"
 	"github.com/go-chi/chi/v5"
-	"github.com/google/uuid"
 	ratelimit "github.com/ralscha/ratelimiter-pg"
 )
-
-const deviceCookieName = "base_device"
 
 const (
 	passkeyRegistrationSessionKey = "passkey_registration_session"
 	passkeyLoginSessionKey        = "passkey_login_session" //nolint:gosec // session key name, not a credential
 	oauthSessionKey               = "oauth_flow_session"    //nolint:gosec // session key name, not a credential
+	standardLoginFailureMessage   = "Invalid email or password."
 )
 
 type AuthHandler struct {
@@ -34,12 +31,13 @@ type AuthHandler struct {
 }
 
 func (h AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		Username string `json:"username"`
-		Email    string `json:"email"`
-		Password string `json:"password"`
-	}
+	var req registerRequest
 	if err := decodeJSON(w, r, &req); err != nil {
+		return
+	}
+	req.normalize()
+	if err := req.validate(); err != nil {
+		writeValidationError(w, err)
 		return
 	}
 
@@ -72,31 +70,29 @@ func (h AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req struct {
-		Identifier   string `json:"identifier"`
-		Password     string `json:"password"`
-		TOTPCode     string `json:"totp_code"`
-		RecoveryCode string `json:"recovery_code"`
-	}
+	var req loginRequest
 	if err := decodeJSON(w, r, &req); err != nil {
 		return
 	}
-
-	deviceID := ensureDeviceID(w, r, h.Secure)
-	principal, err := h.Service.LoginWithPassword(r.Context(), auth.LoginInput{
-		Identifier:   req.Identifier,
-		Password:     req.Password,
-		TOTPCode:     req.TOTPCode,
-		RecoveryCode: req.RecoveryCode,
-		IPAddress:    clientIP(r),
-		UserAgent:    r.UserAgent(),
-	})
-	if err != nil {
-		handleAuthError(w, err)
+	req.normalize()
+	if err := req.validate(); err != nil {
+		writeValidationError(w, err)
 		return
 	}
 
-	if err := h.completeLogin(r.Context(), principal, deviceID); err != nil {
+	principal, err := h.Service.LoginWithPassword(r.Context(), auth.LoginInput{
+		Email:     req.Email,
+		Password:  req.Password,
+		TOTPCode:  req.TOTPCode,
+		IPAddress: clientIP(r),
+		UserAgent: r.UserAgent(),
+	})
+	if err != nil {
+		handlePasswordLoginError(w, err)
+		return
+	}
+
+	if err := h.completeLogin(r.Context(), principal); err != nil {
 		writeError(w, http.StatusInternalServerError, "session_error", err.Error())
 		return
 	}
@@ -116,11 +112,13 @@ func (h AuthHandler) BeginPasskeyRegistration(w http.ResponseWriter, r *http.Req
 }
 
 func (h AuthHandler) FinishPasskeyRegistration(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		Credential json.RawMessage `json:"credential"`
-		Name       string          `json:"name"`
-	}
+	var req passkeyRegistrationRequest
 	if err := decodeJSON(w, r, &req); err != nil {
+		return
+	}
+	req.normalize()
+	if err := req.validate(); err != nil {
+		writeValidationError(w, err)
 		return
 	}
 
@@ -179,8 +177,7 @@ func (h AuthHandler) CompleteOAuth(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if result.Mode == "login" {
-		deviceID := ensureDeviceID(w, r, h.Secure)
-		if err := h.completeLogin(r.Context(), result.Principal, deviceID); err != nil {
+		if err := h.completeLogin(r.Context(), result.Principal); err != nil {
 			writeError(w, http.StatusInternalServerError, "session_error", err.Error())
 			return
 		}
@@ -196,24 +193,24 @@ func (h AuthHandler) CompleteOAuth(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h AuthHandler) FinishPasskeyLogin(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		Credential   json.RawMessage `json:"credential"`
-		TOTPCode     string          `json:"totp_code"`
-		RecoveryCode string          `json:"recovery_code"`
-	}
+	var req passkeyLoginRequest
 	if err := decodeJSON(w, r, &req); err != nil {
+		return
+	}
+	req.normalize()
+	if err := req.validate(); err != nil {
+		writeValidationError(w, err)
 		return
 	}
 
 	sessionJSON := []byte(h.Sessions.GetString(r.Context(), passkeyLoginSessionKey))
-	deviceID := ensureDeviceID(w, r, h.Secure)
-	principal, err := h.Service.FinishPasskeyLogin(r.Context(), sessionJSON, req.Credential, req.TOTPCode, req.RecoveryCode, r.UserAgent(), clientIP(r))
+	principal, err := h.Service.FinishPasskeyLogin(r.Context(), sessionJSON, req.Credential, req.TOTPCode, r.UserAgent(), clientIP(r))
 	if err != nil {
 		handleAuthError(w, err)
 		return
 	}
 
-	if err := h.completeLogin(r.Context(), principal, deviceID); err != nil {
+	if err := h.completeLogin(r.Context(), principal); err != nil {
 		writeError(w, http.StatusInternalServerError, "session_error", err.Error())
 		return
 	}
@@ -244,10 +241,13 @@ func (h AuthHandler) VerifyEmail(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h AuthHandler) RequestPasswordReset(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		Email string `json:"email"`
-	}
+	var req emailRequest
 	if err := decodeJSON(w, r, &req); err != nil {
+		return
+	}
+	req.normalize()
+	if err := req.validate(); err != nil {
+		writeValidationError(w, err)
 		return
 	}
 
@@ -259,10 +259,13 @@ func (h AuthHandler) RequestPasswordReset(w http.ResponseWriter, r *http.Request
 }
 
 func (h AuthHandler) RequestAccountRecovery(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		Email string `json:"email"`
-	}
+	var req emailRequest
 	if err := decodeJSON(w, r, &req); err != nil {
+		return
+	}
+	req.normalize()
+	if err := req.validate(); err != nil {
+		writeValidationError(w, err)
 		return
 	}
 
@@ -274,11 +277,13 @@ func (h AuthHandler) RequestAccountRecovery(w http.ResponseWriter, r *http.Reque
 }
 
 func (h AuthHandler) ResetPassword(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		Token    string `json:"token"`
-		Password string `json:"password"`
-	}
+	var req tokenPasswordRequest
 	if err := decodeJSON(w, r, &req); err != nil {
+		return
+	}
+	req.normalize()
+	if err := req.validate(); err != nil {
+		writeValidationError(w, err)
 		return
 	}
 
@@ -290,11 +295,13 @@ func (h AuthHandler) ResetPassword(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h AuthHandler) RecoverAccount(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		Token    string `json:"token"`
-		Password string `json:"password"`
-	}
+	var req tokenPasswordRequest
 	if err := decodeJSON(w, r, &req); err != nil {
+		return
+	}
+	req.normalize()
+	if err := req.validate(); err != nil {
+		writeValidationError(w, err)
 		return
 	}
 
@@ -327,19 +334,21 @@ func (h AuthHandler) SetupTOTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h AuthHandler) EnableTOTP(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		Code string `json:"code"`
-	}
+	var req enableTOTPRequest
 	if err := decodeJSON(w, r, &req); err != nil {
 		return
 	}
+	req.normalize()
+	if err := req.validate(); err != nil {
+		writeValidationError(w, err)
+		return
+	}
 
-	recoveryCodes, err := h.Service.ConfirmTOTPSetup(r.Context(), h.Sessions.GetInt64(r.Context(), "user_id"), req.Code)
-	if err != nil {
+	if err := h.Service.ConfirmTOTPSetup(r.Context(), h.Sessions.GetInt64(r.Context(), "user_id"), req.Code); err != nil {
 		handleAuthError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"recovery_codes": recoveryCodes})
+	writeJSON(w, http.StatusOK, map[string]any{"totp_enabled": true})
 }
 
 func (h AuthHandler) DisableTOTP(w http.ResponseWriter, r *http.Request) {
@@ -397,7 +406,19 @@ func handleAuthError(w http.ResponseWriter, err error) {
 	}
 }
 
-func (h AuthHandler) completeLogin(ctx context.Context, principal auth.SessionPrincipal, deviceID string) error {
+func handlePasswordLoginError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, auth.ErrInvalidCredentials),
+		errors.Is(err, auth.ErrAccountLocked),
+		errors.Is(err, auth.ErrAccountDisabled),
+		errors.Is(err, auth.ErrEmailUnverified):
+		writeError(w, http.StatusUnauthorized, "invalid_credentials", standardLoginFailureMessage)
+	default:
+		handleAuthError(w, err)
+	}
+}
+
+func (h AuthHandler) completeLogin(ctx context.Context, principal auth.SessionPrincipal) error {
 	if err := h.Sessions.RenewToken(ctx); err != nil {
 		return errors.New("could not renew session")
 	}
@@ -405,31 +426,8 @@ func (h AuthHandler) completeLogin(ctx context.Context, principal auth.SessionPr
 	h.Sessions.Put(ctx, "user_id", principal.UserID)
 	h.Sessions.Put(ctx, "username", principal.Username)
 	h.Sessions.Put(ctx, "roles", principal.Roles)
-	h.Sessions.Put(ctx, "device_id", deviceID)
-
-	if err := h.Service.RecordUserSession(ctx, principal.UserID, deviceID, h.Sessions.Token(ctx), time.Now().UTC().Add(h.Sessions.Lifetime)); err != nil {
-		return errors.New("could not record session")
-	}
 
 	return nil
-}
-
-func ensureDeviceID(w http.ResponseWriter, r *http.Request, secure bool) string {
-	if cookie, err := r.Cookie(deviceCookieName); err == nil && strings.TrimSpace(cookie.Value) != "" {
-		return cookie.Value
-	}
-
-	deviceID := uuid.NewString()
-	http.SetCookie(w, &http.Cookie{
-		Name:     deviceCookieName,
-		Value:    deviceID,
-		Path:     "/",
-		HttpOnly: true,
-		Secure:   secure,
-		SameSite: http.SameSiteLaxMode,
-		MaxAge:   31536000,
-	})
-	return deviceID
 }
 
 func clientIP(r *http.Request) string {

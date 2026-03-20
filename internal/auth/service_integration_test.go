@@ -63,8 +63,8 @@ func TestRegisterCreatesUserRoleVerificationTokenAndEmail(t *testing.T) {
 		t.Fatalf("roles = %v, want [user]", roles)
 	}
 
-	if _, err := queries.GetPasswordCredentialByUserID(ctx, user.ID); err != nil {
-		t.Fatalf("GetPasswordCredentialByUserID() error = %v", err)
+	if _, err := queries.GetUserWithPasswordByEmail(ctx, user.Email); err != nil {
+		t.Fatalf("GetUserWithPasswordByEmail() error = %v", err)
 	}
 
 	emails, err := queries.ListPendingEmails(ctx, 10)
@@ -153,14 +153,8 @@ func TestRequestPasswordResetAndResetPassword(t *testing.T) {
 	if err != nil {
 		t.Fatalf("HashPassword() error = %v", err)
 	}
-	if _, err := queries.UpsertPasswordCredential(ctx, sqlc.UpsertPasswordCredentialParams{UserID: user.ID, PasswordHash: passwordHash}); err != nil {
-		t.Fatalf("UpsertPasswordCredential() error = %v", err)
-	}
-	if err := queries.CreateUserSessionRecord(ctx, sqlc.CreateUserSessionRecordParams{Token: "token-1", UserID: user.ID, DeviceID: "device-1", Expiry: time.Now().UTC().Add(time.Hour)}); err != nil {
-		t.Fatalf("CreateUserSessionRecord() error = %v", err)
-	}
-	if _, err := db.ExecContext(ctx, `INSERT INTO sessions (token, data, expiry) VALUES ($1, $2, $3)`, "token-1", []byte("session"), time.Now().UTC().Add(time.Hour)); err != nil {
-		t.Fatalf("insert sessions row error = %v", err)
+	if _, err := queries.SetUserPasswordHash(ctx, sqlc.SetUserPasswordHashParams{ID: user.ID, PasswordHash: sql.NullString{String: passwordHash, Valid: true}}); err != nil {
+		t.Fatalf("SetUserPasswordHash() error = %v", err)
 	}
 
 	if err := service.RequestPasswordReset(ctx, user.Email); err != nil {
@@ -190,11 +184,11 @@ func TestRequestPasswordResetAndResetPassword(t *testing.T) {
 		t.Fatalf("ResetPassword() error = %v", err)
 	}
 
-	credential, err := queries.GetPasswordCredentialByUserID(ctx, user.ID)
+	credential, err := queries.GetUserWithPasswordByEmail(ctx, user.Email)
 	if err != nil {
-		t.Fatalf("GetPasswordCredentialByUserID() error = %v", err)
+		t.Fatalf("GetUserWithPasswordByEmail() error = %v", err)
 	}
-	match, err := ComparePassword("UpdatedPassword123", credential.PasswordHash)
+	match, err := ComparePassword("UpdatedPassword123", credential.PasswordHash.String)
 	if err != nil {
 		t.Fatalf("ComparePassword() error = %v", err)
 	}
@@ -205,13 +199,11 @@ func TestRequestPasswordResetAndResetPassword(t *testing.T) {
 	if _, err := queries.GetUserToken(ctx, sqlc.GetUserTokenParams{TokenHash: HashToken(payload.Token), Kind: sqlc.TokenKindPasswordReset}); !errors.Is(err, sql.ErrNoRows) {
 		t.Fatalf("GetUserToken(used reset token) error = %v, want sql.ErrNoRows", err)
 	}
-	assertQueryCount(t, ctx, db, `SELECT COUNT(*) FROM sessions WHERE token = 'token-1'`, 0)
-	assertQueryCount(t, ctx, db, `SELECT COUNT(*) FROM user_sessions WHERE token = 'token-1' AND revoked_at IS NOT NULL`, 1)
 }
 
-func TestTOTPFlowAndLoginWithRecoveryCode(t *testing.T) {
+func TestTOTPFlowAndLoginWithCode(t *testing.T) {
 	ctx := context.Background()
-	db, queries, service := newAuthRuntimeTestEnv(t, ctx)
+	_, queries, service := newAuthRuntimeTestEnv(t, ctx)
 
 	passwordHash, err := HashPassword("ValidPassword123")
 	if err != nil {
@@ -219,8 +211,8 @@ func TestTOTPFlowAndLoginWithRecoveryCode(t *testing.T) {
 	}
 	user := createAuthTestUser(t, ctx, queries, "totp-user", "totp@example.com")
 	addRoleToUser(t, ctx, queries, user.ID)
-	if _, err := queries.UpsertPasswordCredential(ctx, sqlc.UpsertPasswordCredentialParams{UserID: user.ID, PasswordHash: passwordHash}); err != nil {
-		t.Fatalf("UpsertPasswordCredential() error = %v", err)
+	if _, err := queries.SetUserPasswordHash(ctx, sqlc.SetUserPasswordHashParams{ID: user.ID, PasswordHash: sql.NullString{String: passwordHash, Valid: true}}); err != nil {
+		t.Fatalf("SetUserPasswordHash() error = %v", err)
 	}
 	if err := queries.MarkUserEmailVerified(ctx, user.ID); err != nil {
 		t.Fatalf("MarkUserEmailVerified() error = %v", err)
@@ -246,12 +238,8 @@ func TestTOTPFlowAndLoginWithRecoveryCode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GenerateCode() error = %v", err)
 	}
-	recoveryCodes, err := service.ConfirmTOTPSetup(ctx, user.ID, code)
-	if err != nil {
+	if err := service.ConfirmTOTPSetup(ctx, user.ID, code); err != nil {
 		t.Fatalf("ConfirmTOTPSetup() error = %v", err)
-	}
-	if len(recoveryCodes) != 10 {
-		t.Fatalf("len(recoveryCodes) = %d, want 10", len(recoveryCodes))
 	}
 
 	configRow, err = queries.GetTotpConfigurationByUserID(ctx, user.ID)
@@ -261,22 +249,24 @@ func TestTOTPFlowAndLoginWithRecoveryCode(t *testing.T) {
 	if !configRow.EnabledAt.Valid {
 		t.Fatal("expected TOTP config to be enabled after confirmation")
 	}
-	assertQueryCount(t, ctx, db, `SELECT COUNT(*) FROM totp_recovery_codes WHERE user_id = $1 AND used_at IS NULL`, 10, user.ID)
-
-	_, err = service.LoginWithPassword(ctx, LoginInput{Identifier: user.Email, Password: "ValidPassword123", IPAddress: "127.0.0.1"})
+	_, err = service.LoginWithPassword(ctx, LoginInput{Email: user.Email, Password: "ValidPassword123", IPAddress: "127.0.0.1"})
 	if !errors.Is(err, ErrTOTPRequired) {
 		t.Fatalf("LoginWithPassword() error = %v, want %v", err, ErrTOTPRequired)
 	}
 
-	principal, err := service.LoginWithPassword(ctx, LoginInput{Identifier: user.Email, Password: "ValidPassword123", RecoveryCode: recoveryCodes[0], IPAddress: "127.0.0.1"})
+	loginCode, err := totp.GenerateCode(setup.Secret, time.Now().UTC())
 	if err != nil {
-		t.Fatalf("LoginWithPassword(recovery code) error = %v", err)
+		t.Fatalf("GenerateCode(login) error = %v", err)
+	}
+
+	principal, err := service.LoginWithPassword(ctx, LoginInput{Email: user.Email, Password: "ValidPassword123", TOTPCode: loginCode, IPAddress: "127.0.0.1"})
+	if err != nil {
+		t.Fatalf("LoginWithPassword(TOTP code) error = %v", err)
 	}
 	if principal.UserID != user.ID || !principal.TOTPEnabled {
 		t.Fatalf("principal = %+v, want authenticated principal with TOTP enabled", principal)
 	}
 
-	assertQueryCount(t, ctx, db, `SELECT COUNT(*) FROM totp_recovery_codes WHERE user_id = $1 AND used_at IS NOT NULL`, 1, user.ID)
 	updatedUser, err := queries.GetUserByID(ctx, user.ID)
 	if err != nil {
 		t.Fatalf("GetUserByID() error = %v", err)
@@ -291,7 +281,6 @@ func TestTOTPFlowAndLoginWithRecoveryCode(t *testing.T) {
 	if _, err := queries.GetTotpConfigurationByUserID(ctx, user.ID); !errors.Is(err, sql.ErrNoRows) {
 		t.Fatalf("GetTotpConfigurationByUserID() after disable error = %v, want sql.ErrNoRows", err)
 	}
-	assertQueryCount(t, ctx, db, `SELECT COUNT(*) FROM totp_recovery_codes WHERE user_id = $1`, 0, user.ID)
 }
 
 func TestLoginWithPasswordEdgeCases(t *testing.T) {
@@ -306,8 +295,8 @@ func TestLoginWithPasswordEdgeCases(t *testing.T) {
 		}
 		user := createAuthTestUser(t, ctx, queries, username, email)
 		addRoleToUser(t, ctx, queries, user.ID)
-		if _, err := queries.UpsertPasswordCredential(ctx, sqlc.UpsertPasswordCredentialParams{UserID: user.ID, PasswordHash: hash}); err != nil {
-			t.Fatalf("UpsertPasswordCredential() error = %v", err)
+		if _, err := queries.SetUserPasswordHash(ctx, sqlc.SetUserPasswordHashParams{ID: user.ID, PasswordHash: sql.NullString{String: hash, Valid: true}}); err != nil {
+			t.Fatalf("SetUserPasswordHash() error = %v", err)
 		}
 		if err := queries.MarkUserEmailVerified(ctx, user.ID); err != nil {
 			t.Fatalf("MarkUserEmailVerified() error = %v", err)
@@ -321,7 +310,7 @@ func TestLoginWithPasswordEdgeCases(t *testing.T) {
 			t.Fatalf("disable user error = %v", err)
 		}
 
-		_, err := service.LoginWithPassword(ctx, LoginInput{Identifier: user.Email, Password: "ValidPassword123", IPAddress: "127.0.0.1"})
+		_, err := service.LoginWithPassword(ctx, LoginInput{Email: user.Email, Password: "ValidPassword123", IPAddress: "127.0.0.1"})
 		if !errors.Is(err, ErrAccountDisabled) {
 			t.Fatalf("LoginWithPassword() error = %v, want %v", err, ErrAccountDisabled)
 		}
@@ -333,7 +322,7 @@ func TestLoginWithPasswordEdgeCases(t *testing.T) {
 			t.Fatalf("lock user error = %v", err)
 		}
 
-		_, err := service.LoginWithPassword(ctx, LoginInput{Identifier: user.Email, Password: "ValidPassword123", IPAddress: "127.0.0.1"})
+		_, err := service.LoginWithPassword(ctx, LoginInput{Email: user.Email, Password: "ValidPassword123", IPAddress: "127.0.0.1"})
 		if !errors.Is(err, ErrAccountLocked) {
 			t.Fatalf("LoginWithPassword() error = %v, want %v", err, ErrAccountLocked)
 		}
@@ -345,20 +334,27 @@ func TestLoginWithPasswordEdgeCases(t *testing.T) {
 			t.Fatalf("HashPassword() error = %v", err)
 		}
 		user := createAuthTestUser(t, ctx, queries, "unverified-user", "unverified@example.com")
-		if _, err := queries.UpsertPasswordCredential(ctx, sqlc.UpsertPasswordCredentialParams{UserID: user.ID, PasswordHash: hash}); err != nil {
-			t.Fatalf("UpsertPasswordCredential() error = %v", err)
+		if _, err := queries.SetUserPasswordHash(ctx, sqlc.SetUserPasswordHashParams{ID: user.ID, PasswordHash: sql.NullString{String: hash, Valid: true}}); err != nil {
+			t.Fatalf("SetUserPasswordHash() error = %v", err)
 		}
 
-		_, err = service.LoginWithPassword(ctx, LoginInput{Identifier: user.Email, Password: "ValidPassword123", IPAddress: "127.0.0.1"})
+		_, err = service.LoginWithPassword(ctx, LoginInput{Email: user.Email, Password: "ValidPassword123", IPAddress: "127.0.0.1"})
 		if !errors.Is(err, ErrEmailUnverified) {
 			t.Fatalf("LoginWithPassword() error = %v, want %v", err, ErrEmailUnverified)
+		}
+	})
+
+	t.Run("missing account returns invalid credentials", func(t *testing.T) {
+		_, err := service.LoginWithPassword(ctx, LoginInput{Email: "missing@example.com", Password: "ValidPassword123", IPAddress: "127.0.0.1"})
+		if !errors.Is(err, ErrInvalidCredentials) {
+			t.Fatalf("LoginWithPassword() error = %v, want %v", err, ErrInvalidCredentials)
 		}
 	})
 
 	t.Run("invalid password increments failures", func(t *testing.T) {
 		user := createVerifiedUser("wrong-pass-user", "wrongpass@example.com", "ValidPassword123")
 
-		_, err := service.LoginWithPassword(ctx, LoginInput{Identifier: user.Email, Password: "WrongPassword123", IPAddress: "127.0.0.1"})
+		_, err := service.LoginWithPassword(ctx, LoginInput{Email: user.Email, Password: "WrongPassword123", IPAddress: "127.0.0.1"})
 		if !errors.Is(err, ErrInvalidCredentials) {
 			t.Fatalf("LoginWithPassword() error = %v, want %v", err, ErrInvalidCredentials)
 		}
@@ -371,25 +367,22 @@ func TestLoginWithPasswordEdgeCases(t *testing.T) {
 		}
 	})
 
-	t.Run("username login succeeds and resets counters", func(t *testing.T) {
+	t.Run("username login returns invalid credentials", func(t *testing.T) {
 		user := createVerifiedUser("username-login", "username-login@example.com", "ValidPassword123")
 		if _, err := db.ExecContext(ctx, `UPDATE users SET failed_login_count = 3 WHERE id = $1`, user.ID); err != nil {
 			t.Fatalf("seed failed_login_count error = %v", err)
 		}
 
-		principal, err := service.LoginWithPassword(ctx, LoginInput{Identifier: user.Username, Password: "ValidPassword123", IPAddress: "127.0.0.1"})
-		if err != nil {
-			t.Fatalf("LoginWithPassword() error = %v", err)
-		}
-		if principal.UserID != user.ID || principal.Username != user.Username {
-			t.Fatalf("principal = %+v, want authenticated user", principal)
+		_, err := service.LoginWithPassword(ctx, LoginInput{Email: user.Username, Password: "ValidPassword123", IPAddress: "127.0.0.1"})
+		if !errors.Is(err, ErrInvalidCredentials) {
+			t.Fatalf("LoginWithPassword() error = %v, want %v", err, ErrInvalidCredentials)
 		}
 		updatedUser, err := queries.GetUserByID(ctx, user.ID)
 		if err != nil {
 			t.Fatalf("GetUserByID() error = %v", err)
 		}
-		if !updatedUser.LastLoginAt.Valid || updatedUser.FailedLoginCount != 0 {
-			t.Fatalf("updated user = %+v, want last_login_at set and failures reset", updatedUser)
+		if updatedUser.LastLoginAt.Valid || updatedUser.FailedLoginCount != 3 {
+			t.Fatalf("updated user = %+v, want no login side effects", updatedUser)
 		}
 	})
 }
@@ -404,8 +397,8 @@ func TestRequestAccountRecoveryAndRecoverAccount(t *testing.T) {
 		t.Fatalf("HashPassword() error = %v", err)
 	}
 	user := createAuthTestUser(t, ctx, queries, "recover-user", "recover@example.com")
-	if _, err := queries.UpsertPasswordCredential(ctx, sqlc.UpsertPasswordCredentialParams{UserID: user.ID, PasswordHash: passwordHash}); err != nil {
-		t.Fatalf("UpsertPasswordCredential() error = %v", err)
+	if _, err := queries.SetUserPasswordHash(ctx, sqlc.SetUserPasswordHashParams{ID: user.ID, PasswordHash: sql.NullString{String: passwordHash, Valid: true}}); err != nil {
+		t.Fatalf("SetUserPasswordHash() error = %v", err)
 	}
 	if _, err := db.ExecContext(ctx, `UPDATE users SET is_active = FALSE, locked_until = NOW() + INTERVAL '1 hour', failed_login_count = 2, disabled_reason = 'inactivity', disabled_at = NOW() WHERE id = $1`, user.ID); err != nil {
 		t.Fatalf("disable user error = %v", err)
@@ -413,10 +406,6 @@ func TestRequestAccountRecoveryAndRecoverAccount(t *testing.T) {
 	if _, err := queries.UpsertTotpConfiguration(ctx, sqlc.UpsertTotpConfigurationParams{UserID: user.ID, SecretCiphertext: []byte("cipher"), SecretNonce: []byte("nonce"), EnabledAt: sql.NullTime{Time: time.Now().UTC(), Valid: true}}); err != nil {
 		t.Fatalf("UpsertTotpConfiguration() error = %v", err)
 	}
-	if _, err := queries.CreateTotpRecoveryCode(ctx, sqlc.CreateTotpRecoveryCodeParams{UserID: user.ID, CodeHash: HashToken("RECOVERYCODE")}); err != nil {
-		t.Fatalf("CreateTotpRecoveryCode() error = %v", err)
-	}
-
 	if err := service.RequestAccountRecovery(ctx, user.Email); err != nil {
 		t.Fatalf("RequestAccountRecovery() error = %v", err)
 	}
@@ -444,11 +433,11 @@ func TestRequestAccountRecoveryAndRecoverAccount(t *testing.T) {
 		t.Fatalf("RecoverAccount() error = %v", err)
 	}
 
-	credential, err := queries.GetPasswordCredentialByUserID(ctx, user.ID)
+	credential, err := queries.GetUserWithPasswordByEmail(ctx, user.Email)
 	if err != nil {
-		t.Fatalf("GetPasswordCredentialByUserID() error = %v", err)
+		t.Fatalf("GetUserWithPasswordByEmail() error = %v", err)
 	}
-	match, err := ComparePassword("RecoveredPassword123", credential.PasswordHash)
+	match, err := ComparePassword("RecoveredPassword123", credential.PasswordHash.String)
 	if err != nil {
 		t.Fatalf("ComparePassword() error = %v", err)
 	}
@@ -465,7 +454,6 @@ func TestRequestAccountRecoveryAndRecoverAccount(t *testing.T) {
 	if _, err := queries.GetTotpConfigurationByUserID(ctx, user.ID); !errors.Is(err, sql.ErrNoRows) {
 		t.Fatalf("GetTotpConfigurationByUserID() error = %v, want sql.ErrNoRows", err)
 	}
-	assertQueryCount(t, ctx, db, `SELECT COUNT(*) FROM totp_recovery_codes WHERE user_id = $1`, 0, user.ID)
 	if _, err := queries.GetUserToken(ctx, sqlc.GetUserTokenParams{TokenHash: HashToken(payload.Token), Kind: sqlc.TokenKindAccountRecovery}); !errors.Is(err, sql.ErrNoRows) {
 		t.Fatalf("GetUserToken(used recovery token) error = %v, want sql.ErrNoRows", err)
 	}
@@ -499,43 +487,6 @@ func TestCurrentUserReturnsRolesAndTOTPFlag(t *testing.T) {
 	}
 	if !principal.TOTPEnabled {
 		t.Fatal("expected TOTPEnabled to be true")
-	}
-}
-
-func TestRecordUserSessionReplacesExistingDeviceSession(t *testing.T) {
-	ctx := context.Background()
-	db, queries := newAuthTestDB(t, ctx)
-	service := &Service{queries: queries}
-
-	user := createAuthTestUser(t, ctx, queries, "session-user", "session@example.com")
-	if err := queries.CreateUserSessionRecord(ctx, sqlc.CreateUserSessionRecordParams{
-		Token:    "old-device-token",
-		UserID:   user.ID,
-		DeviceID: "device-1",
-		Expiry:   time.Now().UTC().Add(time.Hour),
-	}); err != nil {
-		t.Fatalf("CreateUserSessionRecord(old same device) error = %v", err)
-	}
-	if err := queries.CreateUserSessionRecord(ctx, sqlc.CreateUserSessionRecordParams{
-		Token:    "other-device-token",
-		UserID:   user.ID,
-		DeviceID: "device-2",
-		Expiry:   time.Now().UTC().Add(time.Hour),
-	}); err != nil {
-		t.Fatalf("CreateUserSessionRecord(other device) error = %v", err)
-	}
-
-	if err := service.RecordUserSession(ctx, user.ID, "device-1", "new-device-token", time.Now().UTC().Add(2*time.Hour)); err != nil {
-		t.Fatalf("RecordUserSession() error = %v", err)
-	}
-
-	assertQueryCount(t, ctx, db, `SELECT COUNT(*) FROM user_sessions WHERE token = 'new-device-token' AND revoked_at IS NULL`, 1)
-	assertQueryCount(t, ctx, db, `SELECT COUNT(*) FROM user_sessions WHERE token = 'old-device-token' AND revoked_at IS NOT NULL`, 1)
-	assertQueryCount(t, ctx, db, `SELECT COUNT(*) FROM user_sessions WHERE token = 'other-device-token' AND revoked_at IS NULL`, 1)
-	assertQueryCount(t, ctx, db, `SELECT COUNT(*) FROM user_sessions WHERE user_id = $1`, 3, user.ID)
-
-	if err := service.RecordUserSession(ctx, 0, "", "", time.Now().UTC()); err != nil {
-		t.Fatalf("RecordUserSession() for blank input error = %v, want nil", err)
 	}
 }
 
@@ -603,7 +554,7 @@ func TestPasskeyBeginFlowsGenerateSessions(t *testing.T) {
 	if err := service.FinishPasskeyRegistration(ctx, user.ID, nil, []byte(`{}`), "Laptop key"); !errors.Is(err, ErrPasskeyCeremony) {
 		t.Fatalf("FinishPasskeyRegistration() error = %v, want %v", err, ErrPasskeyCeremony)
 	}
-	if _, err := service.FinishPasskeyLogin(ctx, nil, []byte(`{}`), "", "", "agent", "127.0.0.1"); !errors.Is(err, ErrPasskeyCeremony) {
+	if _, err := service.FinishPasskeyLogin(ctx, nil, []byte(`{}`), "", "agent", "127.0.0.1"); !errors.Is(err, ErrPasskeyCeremony) {
 		t.Fatalf("FinishPasskeyLogin() error = %v, want %v", err, ErrPasskeyCeremony)
 	}
 }

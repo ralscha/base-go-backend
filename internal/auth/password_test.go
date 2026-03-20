@@ -25,3 +25,9 @@ func TestHashPasswordWeakPassword(t *testing.T) {
 		t.Fatalf("HashPassword() error = %v, want %v", err, ErrWeakPassword)
 	}
 }
+
+func TestCompareWithInvalidCredentialsSentinel(t *testing.T) {
+	if err := compareWithInvalidCredentialsSentinel("some password value"); err != nil {
+		t.Fatalf("compareWithInvalidCredentialsSentinel() error = %v", err)
+	}
+}

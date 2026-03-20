@@ -80,9 +80,22 @@ func TestRunMigrationsCreatesSchemaAndCanBeReapplied(t *testing.T) {
 	}
 
 	assertRelationExists(t, ctx, db, "users")
-	assertRelationExists(t, ctx, db, "password_credentials")
 	assertRelationExists(t, ctx, db, "oauth_accounts")
 	assertRelationExists(t, ctx, db, "scheduled_jobs")
+
+	var passwordHashType sql.NullString
+	if err := db.QueryRowContext(ctx, `
+		SELECT data_type
+		FROM information_schema.columns
+		WHERE table_schema = 'public'
+		  AND table_name = 'users'
+		  AND column_name = 'password_hash'
+	`).Scan(&passwordHashType); err != nil {
+		t.Fatalf("query users.password_hash column: %v", err)
+	}
+	if !passwordHashType.Valid || passwordHashType.String != "text" {
+		t.Fatalf("users.password_hash data type = %q, want text", passwordHashType.String)
+	}
 
 	var roleCount int
 	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM roles WHERE name IN ('admin', 'user')`).Scan(&roleCount); err != nil {

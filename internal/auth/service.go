@@ -71,12 +71,11 @@ type RegisterInput struct {
 }
 
 type LoginInput struct {
-	Identifier   string
-	Password     string
-	TOTPCode     string
-	RecoveryCode string
-	IPAddress    string
-	UserAgent    string
+	Email     string
+	Password  string
+	TOTPCode  string
+	IPAddress string
+	UserAgent string
 }
 
 func NewService(ctx context.Context, db *sql.DB, pgxPool *pgxpool.Pool, cfg config.Config) (*Service, error) {
@@ -146,7 +145,7 @@ func (s *Service) Register(ctx context.Context, input RegisterInput) (SessionPri
 		return SessionPrincipal{}, err
 	}
 
-	if _, err := q.UpsertPasswordCredential(ctx, sqlc.UpsertPasswordCredentialParams{UserID: user.ID, PasswordHash: passwordHash}); err != nil {
+	if _, err := q.SetUserPasswordHash(ctx, sqlc.SetUserPasswordHashParams{ID: user.ID, PasswordHash: sql.NullString{String: passwordHash, Valid: true}}); err != nil {
 		return SessionPrincipal{}, err
 	}
 
@@ -197,20 +196,28 @@ func (s *Service) Register(ctx context.Context, input RegisterInput) (SessionPri
 }
 
 func (s *Service) LoginWithPassword(ctx context.Context, input LoginInput) (SessionPrincipal, error) {
-	identifier := strings.ToLower(strings.TrimSpace(input.Identifier))
-	if identifier == "" || input.Password == "" {
+	email := strings.ToLower(strings.TrimSpace(input.Email))
+	if email == "" || input.Password == "" {
 		return SessionPrincipal{}, ErrInvalidCredentials
 	}
 
-	if err := s.enforceRateLimit(ctx, identifier, input.IPAddress); err != nil {
+	if err := s.enforceRateLimit(ctx, email, input.IPAddress); err != nil {
 		return SessionPrincipal{}, err
 	}
 
-	user, err := s.lookupUser(ctx, identifier)
+	user, err := s.queries.GetUserWithPasswordByEmail(ctx, email)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
+			if err := compareWithInvalidCredentialsSentinel(input.Password); err != nil {
+				return SessionPrincipal{}, err
+			}
 			return SessionPrincipal{}, ErrInvalidCredentials
 		}
+		return SessionPrincipal{}, err
+	}
+
+	match, err := ComparePassword(input.Password, user.PasswordHash.String)
+	if err != nil {
 		return SessionPrincipal{}, err
 	}
 
@@ -224,15 +231,6 @@ func (s *Service) LoginWithPassword(ctx context.Context, input LoginInput) (Sess
 		return SessionPrincipal{}, ErrEmailUnverified
 	}
 
-	credential, err := s.queries.GetPasswordCredentialByUserID(ctx, user.ID)
-	if err != nil {
-		return SessionPrincipal{}, err
-	}
-
-	match, err := ComparePassword(input.Password, credential.PasswordHash)
-	if err != nil {
-		return SessionPrincipal{}, err
-	}
 	if !match {
 		if err := s.handleFailedLogin(ctx, user); err != nil {
 			return SessionPrincipal{}, err
@@ -240,7 +238,7 @@ func (s *Service) LoginWithPassword(ctx context.Context, input LoginInput) (Sess
 		return SessionPrincipal{}, ErrInvalidCredentials
 	}
 
-	if err := s.validateSecondFactor(ctx, user.ID, input.TOTPCode, input.RecoveryCode); err != nil {
+	if err := s.validateSecondFactor(ctx, user.ID, input.TOTPCode); err != nil {
 		if err2 := s.handleFailedLogin(ctx, user); err2 != nil {
 			return SessionPrincipal{}, err2
 		}
@@ -286,49 +284,36 @@ func (s *Service) BeginTOTPSetup(ctx context.Context, userID int64) (TOTPSetup, 
 	}, nil
 }
 
-func (s *Service) ConfirmTOTPSetup(ctx context.Context, userID int64, code string) ([]string, error) {
+func (s *Service) ConfirmTOTPSetup(ctx context.Context, userID int64, code string) error {
 	configRow, err := s.queries.GetTotpConfigurationByUserID(ctx, userID)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	secret, err := decryptSecret(configRow.SecretCiphertext, configRow.SecretNonce, s.cfg.Security.EncryptionKey)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	if !validateTOTPCode(secret, code) {
-		return nil, ErrInvalidTOTP
-	}
-
-	recoveryCodes, err := generateRecoveryCodes(10)
-	if err != nil {
-		return nil, err
+		return ErrInvalidTOTP
 	}
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	defer func() { _ = tx.Rollback() }()
 
 	q := s.queries.WithTx(tx)
 	if err := q.EnableTotpConfiguration(ctx, userID); err != nil {
-		return nil, err
-	}
-	if err := q.DeleteTotpRecoveryCodesByUserID(ctx, userID); err != nil {
-		return nil, err
-	}
-	for _, recoveryCode := range recoveryCodes {
-		if _, err := q.CreateTotpRecoveryCode(ctx, sqlc.CreateTotpRecoveryCodeParams{UserID: userID, CodeHash: HashToken(recoveryCode)}); err != nil {
-			return nil, err
-		}
+		return err
 	}
 
 	if err := tx.Commit(); err != nil {
-		return nil, err
+		return err
 	}
 
-	return recoveryCodes, nil
+	return nil
 }
 
 func (s *Service) DisableTOTP(ctx context.Context, userID int64) error {
@@ -339,9 +324,6 @@ func (s *Service) DisableTOTP(ctx context.Context, userID int64) error {
 	defer func() { _ = tx.Rollback() }()
 
 	q := s.queries.WithTx(tx)
-	if err := q.DeleteTotpRecoveryCodesByUserID(ctx, userID); err != nil {
-		return err
-	}
 	if err := q.DeleteTotpConfigurationByUserID(ctx, userID); err != nil {
 		return err
 	}
@@ -499,13 +481,10 @@ func (s *Service) RecoverAccount(ctx context.Context, token string, password str
 	defer func() { _ = tx.Rollback() }()
 
 	q := s.queries.WithTx(tx)
-	if _, err := q.UpsertPasswordCredential(ctx, sqlc.UpsertPasswordCredentialParams{UserID: tokenRow.UserID, PasswordHash: passwordHash}); err != nil {
+	if _, err := q.SetUserPasswordHash(ctx, sqlc.SetUserPasswordHashParams{ID: tokenRow.UserID, PasswordHash: sql.NullString{String: passwordHash, Valid: true}}); err != nil {
 		return err
 	}
 	if err := q.RestoreUserAccess(ctx, tokenRow.UserID); err != nil {
-		return err
-	}
-	if err := q.DeleteTotpRecoveryCodesByUserID(ctx, tokenRow.UserID); err != nil {
 		return err
 	}
 	if err := q.DeleteTotpConfigurationByUserID(ctx, tokenRow.UserID); err != nil {
@@ -542,19 +521,13 @@ func (s *Service) ResetPassword(ctx context.Context, token string, password stri
 	defer func() { _ = tx.Rollback() }()
 
 	q := s.queries.WithTx(tx)
-	if _, err := q.UpsertPasswordCredential(ctx, sqlc.UpsertPasswordCredentialParams{UserID: tokenRow.UserID, PasswordHash: passwordHash}); err != nil {
+	if _, err := q.SetUserPasswordHash(ctx, sqlc.SetUserPasswordHashParams{ID: tokenRow.UserID, PasswordHash: sql.NullString{String: passwordHash, Valid: true}}); err != nil {
 		return err
 	}
 	if err := q.UseUserToken(ctx, tokenRow.ID); err != nil {
 		return err
 	}
 	if err := q.LockUserUntil(ctx, sqlc.LockUserUntilParams{ID: tokenRow.UserID}); err != nil {
-		return err
-	}
-	if err := q.RevokeAllUserSessions(ctx, tokenRow.UserID); err != nil {
-		return err
-	}
-	if err := q.RevokeAllUserSessionRecords(ctx, tokenRow.UserID); err != nil {
 		return err
 	}
 
@@ -657,32 +630,8 @@ func (s *Service) CompleteOAuthAuthentication(ctx context.Context, provider stri
 	return result, nil
 }
 
-func (s *Service) RecordUserSession(ctx context.Context, userID int64, deviceID, token string, expiry time.Time) error {
-	if userID == 0 || deviceID == "" || token == "" {
-		return nil
-	}
-
-	if err := s.queries.RevokeDeviceSessions(ctx, sqlc.RevokeDeviceSessionsParams{UserID: userID, DeviceID: deviceID}); err != nil {
-		return err
-	}
-
-	return s.queries.CreateUserSessionRecord(ctx, sqlc.CreateUserSessionRecordParams{
-		Token:    token,
-		UserID:   userID,
-		DeviceID: deviceID,
-		Expiry:   expiry.UTC(),
-	})
-}
-
-func (s *Service) lookupUser(ctx context.Context, identifier string) (sqlc.User, error) {
-	if strings.Contains(identifier, "@") {
-		return s.queries.GetUserByEmail(ctx, identifier)
-	}
-	return s.queries.GetUserByUsername(ctx, identifier)
-}
-
-func (s *Service) enforceRateLimit(ctx context.Context, identifier, ip string) error {
-	decision, err := s.limiter.Allow(ctx, "login:user:"+identifier)
+func (s *Service) enforceRateLimit(ctx context.Context, email, ip string) error {
+	decision, err := s.limiter.Allow(ctx, "login:email:"+email)
 	if err != nil {
 		return err
 	}
@@ -778,7 +727,7 @@ func (s *Service) principalWithFactors(ctx context.Context, user sqlc.User, role
 	return principal, nil
 }
 
-func (s *Service) validateSecondFactor(ctx context.Context, userID int64, code string, recoveryCode string) error {
+func (s *Service) validateSecondFactor(ctx context.Context, userID int64, code string) error {
 	configRow, err := s.queries.GetTotpConfigurationByUserID(ctx, userID)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -788,17 +737,6 @@ func (s *Service) validateSecondFactor(ctx context.Context, userID int64, code s
 	}
 	if !configRow.EnabledAt.Valid {
 		return nil
-	}
-
-	if strings.TrimSpace(recoveryCode) != "" {
-		used, err := s.queries.ConsumeTotpRecoveryCode(ctx, sqlc.ConsumeTotpRecoveryCodeParams{UserID: userID, CodeHash: HashToken(strings.TrimSpace(recoveryCode))})
-		if err != nil {
-			return err
-		}
-		if used > 0 {
-			return nil
-		}
-		return ErrInvalidTOTP
 	}
 
 	secret, err := decryptSecret(configRow.SecretCiphertext, configRow.SecretNonce, s.cfg.Security.EncryptionKey)
@@ -822,21 +760,6 @@ func validateTOTPCode(secret, code string) bool {
 		Algorithm: otp.AlgorithmSHA1,
 	})
 	return err == nil && valid
-}
-
-func generateRecoveryCodes(count int) ([]string, error) {
-	codes := make([]string, 0, count)
-	for range count {
-		plain, _, err := NewToken()
-		if err != nil {
-			return nil, err
-		}
-		if len(plain) > 12 {
-			plain = plain[:12]
-		}
-		codes = append(codes, strings.ToUpper(plain))
-	}
-	return codes, nil
 }
 
 func inetValue(value string) pqtype.Inet {

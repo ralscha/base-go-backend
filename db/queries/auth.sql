@@ -1,20 +1,8 @@
--- name: UpsertPasswordCredential :one
-INSERT INTO password_credentials (
-    user_id,
-    password_hash
-) VALUES (
-    $1,
-    $2
-)
-ON CONFLICT (user_id)
-DO UPDATE SET
-    password_hash = EXCLUDED.password_hash
+-- name: SetUserPasswordHash :one
+UPDATE users
+SET password_hash = $2
+WHERE id = $1
 RETURNING *;
-
--- name: GetPasswordCredentialByUserID :one
-SELECT *
-FROM password_credentials
-WHERE user_id = $1;
 
 -- name: CreateUserToken :one
 INSERT INTO user_tokens (
