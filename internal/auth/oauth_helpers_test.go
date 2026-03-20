@@ -25,12 +25,13 @@ func TestApplyOAuthProviderDefaults(t *testing.T) {
 }
 
 func TestNewOAuthProviderClientsSkipsDisabledAndNormalizesNames(t *testing.T) {
-	clients, err := newOAuthProviderClients(config.OAuthConfig{
+	clients := newOAuthProviderClients(config.OAuthConfig{
 		Providers: map[string]config.OAuthProviderConfig{
+			//nolint:gosec // Test-only OAuth provider fixture uses placeholder values, not real credentials.
 			" GitHub ": {
 				Enabled:      true,
-				ClientID:     "client-id",
-				ClientSecret: "client-secret",
+				ClientID:     strings.Repeat("a", 12),
+				ClientSecret: strings.Repeat("b", 24),
 				AuthURL:      "https://example.com/auth",
 				TokenURL:     "https://example.com/token",
 				UserInfoURL:  "https://example.com/userinfo",
@@ -39,9 +40,6 @@ func TestNewOAuthProviderClientsSkipsDisabledAndNormalizesNames(t *testing.T) {
 			"google": {Enabled: false},
 		},
 	}, http.DefaultClient)
-	if err != nil {
-		t.Fatalf("newOAuthProviderClients() error = %v", err)
-	}
 	if len(clients) != 1 {
 		t.Fatalf("len(clients) = %d, want 1", len(clients))
 	}
@@ -156,10 +154,10 @@ func TestPayloadHelpersAndUtilityFunctions(t *testing.T) {
 	if got := sanitizeUsername("  Jane Doe!@# "); got != "janedoe" {
 		t.Fatalf("sanitizeUsername() = %q, want janedoe", got)
 	}
-	if got := modeForUserID(7); got != "link" {
+	if got := modeForUserID(7); got != oauthModeLink {
 		t.Fatalf("modeForUserID(7) = %q, want link", got)
 	}
-	if got := modeForUserID(0); got != "login" {
+	if got := modeForUserID(0); got != oauthModeLogin {
 		t.Fatalf("modeForUserID(0) = %q, want login", got)
 	}
 

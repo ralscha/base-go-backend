@@ -68,6 +68,16 @@ func TestRenderBodyRejectsInvalidPayload(t *testing.T) {
 	}
 }
 
+func TestRenderBodyWithoutPayloadIncludesTemplate(t *testing.T) {
+	body, err := renderBody(sqlc.EmailOutbox{Template: "verify-email"})
+	if err != nil {
+		t.Fatalf("renderBody() error = %v", err)
+	}
+	if body != "Template: verify-email\n\n" {
+		t.Fatalf("renderBody() = %q, want template-only body", body)
+	}
+}
+
 func TestSendReturnsErrorWhenMailerDisabled(t *testing.T) {
 	mailer := New(slog.New(slog.NewTextHandler(io.Discard, nil)), config.MailerConfig{
 		Enabled: false,
@@ -85,5 +95,46 @@ func TestSendReturnsErrorWhenMailerDisabled(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "mailer disabled") {
 		t.Fatalf("Send() error = %v, want mailer disabled error", err)
+	}
+}
+
+func TestSendRejectsInvalidPayloadBeforeSMTP(t *testing.T) {
+	mailer := New(slog.New(slog.NewTextHandler(io.Discard, nil)), config.MailerConfig{
+		Enabled: true,
+		From:    "from@example.com",
+		Host:    "127.0.0.1",
+		Port:    1,
+	})
+
+	err := mailer.Send(context.Background(), sqlc.EmailOutbox{
+		ID:        2,
+		Template:  "welcome",
+		Recipient: "to@example.com",
+		Subject:   "Hello",
+		Payload:   dbtype.RawMessage(`{"broken":`),
+	})
+	if err == nil || !strings.Contains(err.Error(), "decode email payload") {
+		t.Fatalf("Send() error = %v, want payload decode error", err)
+	}
+}
+
+func TestSendTLSDialError(t *testing.T) {
+	mailer := New(slog.New(slog.NewTextHandler(io.Discard, nil)), config.MailerConfig{
+		Enabled:    true,
+		From:       "from@example.com",
+		Host:       "127.0.0.1",
+		Port:       1,
+		RequireTLS: true,
+	})
+
+	err := mailer.Send(context.Background(), sqlc.EmailOutbox{
+		ID:        3,
+		Template:  "welcome",
+		Recipient: "to@example.com",
+		Subject:   "Hello",
+		Payload:   dbtype.RawMessage(`{"name":"alice"}`),
+	})
+	if err == nil || !strings.Contains(err.Error(), "tls dial smtp") {
+		t.Fatalf("Send() error = %v, want TLS dial error", err)
 	}
 }

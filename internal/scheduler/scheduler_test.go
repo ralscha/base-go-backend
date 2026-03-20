@@ -5,12 +5,14 @@ import (
 	"database/sql"
 	"io"
 	"log/slog"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"base/internal/config"
 	"base/internal/database"
+	"base/internal/mailer"
 	"base/internal/store/sqlc"
 
 	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
@@ -131,10 +133,10 @@ func TestCleanupRemovesExpiredAndRevokedRecords(t *testing.T) {
 	scheduler := &Scheduler{logger: discardLogger(), q: queries}
 	scheduler.cleanup(ctx)
 
-	assertCount(t, ctx, db, `SELECT COUNT(*) FROM user_sessions`, 1)
-	assertCount(t, ctx, db, `SELECT COUNT(*) FROM user_sessions WHERE token = 'active-session'`, 1)
-	assertCount(t, ctx, db, `SELECT COUNT(*) FROM user_tokens`, 1)
-	assertCount(t, ctx, db, `SELECT COUNT(*) FROM user_tokens WHERE token_hash = 'active-token'`, 1)
+	assertCount(t, ctx, db, `SELECT COUNT(*) FROM user_sessions`)
+	assertCount(t, ctx, db, `SELECT COUNT(*) FROM user_sessions WHERE token = 'active-session'`)
+	assertCount(t, ctx, db, `SELECT COUNT(*) FROM user_tokens`)
+	assertCount(t, ctx, db, `SELECT COUNT(*) FROM user_tokens WHERE token_hash = 'active-token'`)
 }
 
 func TestDisableInactiveUsersDisablesOnlyStaleAccounts(t *testing.T) {
@@ -189,6 +191,74 @@ func TestDisableInactiveUsersDisablesOnlyStaleAccounts(t *testing.T) {
 	}
 }
 
+func TestProcessOutboxLeavesEmailPendingWhenMailerDisabled(t *testing.T) {
+	ctx := context.Background()
+	db, queries := newSchedulerTestDB(t, ctx)
+
+	queuedEmail, err := queries.EnqueueEmail(ctx, sqlc.EnqueueEmailParams{
+		Template:    "welcome",
+		Recipient:   "disabled@example.com",
+		Subject:     "Hello",
+		Payload:     []byte(`{"name":"alice"}`),
+		AvailableAt: time.Now().UTC().Add(-time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("EnqueueEmail() error = %v", err)
+	}
+
+	scheduler := &Scheduler{
+		logger: discardLogger(),
+		mail:   nil,
+		q:      queries,
+	}
+	scheduler.processOutbox(ctx)
+
+	assertCount(t, ctx, db, `SELECT COUNT(*) FROM email_outbox WHERE id = $1 AND sent_at IS NULL AND last_error IS NULL`, queuedEmail.ID)
+	assertCount(t, ctx, db, `SELECT COUNT(*) FROM email_outbox`)
+}
+
+func TestProcessOutboxMarksEmailFailedWhenSendFails(t *testing.T) {
+	ctx := context.Background()
+	db, queries := newSchedulerTestDB(t, ctx)
+
+	queuedEmail, err := queries.EnqueueEmail(ctx, sqlc.EnqueueEmailParams{
+		Template:    "welcome",
+		Recipient:   "failure@example.com",
+		Subject:     "Hello",
+		Payload:     []byte(`{"name":"alice"}`),
+		AvailableAt: time.Now().UTC().Add(-time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("EnqueueEmail() error = %v", err)
+	}
+
+	scheduler := &Scheduler{
+		logger: discardLogger(),
+		mail: mailer.New(discardLogger(), config.MailerConfig{
+			Enabled: true,
+			From:    "from@example.com",
+			Host:    "127.0.0.1",
+			Port:    1,
+		}),
+		q: queries,
+	}
+	scheduler.processOutbox(ctx)
+
+	assertCount(t, ctx, db, `SELECT COUNT(*) FROM email_outbox WHERE id = $1 AND sent_at IS NULL AND last_error IS NOT NULL`, queuedEmail.ID)
+
+	var attempts int32
+	var lastError sql.NullString
+	if err := db.QueryRowContext(ctx, `SELECT attempts, last_error FROM email_outbox WHERE id = $1`, queuedEmail.ID).Scan(&attempts, &lastError); err != nil {
+		t.Fatalf("query email_outbox error = %v", err)
+	}
+	if attempts != 1 {
+		t.Fatalf("attempts = %d, want 1", attempts)
+	}
+	if !lastError.Valid || strings.TrimSpace(lastError.String) == "" {
+		t.Fatalf("last_error = %+v, want populated failure", lastError)
+	}
+}
+
 func newSchedulerTestDB(t *testing.T, ctx context.Context) (*sql.DB, *sqlc.Queries) {
 	t.Helper()
 
@@ -237,14 +307,14 @@ func discardLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
-func assertCount(t *testing.T, ctx context.Context, db *sql.DB, query string, want int) {
+func assertCount(t *testing.T, ctx context.Context, db *sql.DB, query string, args ...any) {
 	t.Helper()
 
 	var got int
-	if err := db.QueryRowContext(ctx, query).Scan(&got); err != nil {
+	if err := db.QueryRowContext(ctx, query, args...).Scan(&got); err != nil {
 		t.Fatalf("count query %q error = %v", query, err)
 	}
-	if got != want {
-		t.Fatalf("count query %q = %d, want %d", query, got, want)
+	if got != 1 {
+		t.Fatalf("count query %q = %d, want %d", query, got, 1)
 	}
 }

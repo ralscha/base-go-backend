@@ -101,10 +101,7 @@ func NewService(ctx context.Context, db *sql.DB, pgxPool *pgxpool.Pool, cfg conf
 		return nil, fmt.Errorf("init webauthn: %w", err)
 	}
 
-	oauthProviders, err := newOAuthProviderClients(cfg.OAuth, http.DefaultClient)
-	if err != nil {
-		return nil, fmt.Errorf("init oauth providers: %w", err)
-	}
+	oauthProviders := newOAuthProviderClients(cfg.OAuth, http.DefaultClient)
 
 	return &Service{
 		db:       db,
@@ -622,7 +619,7 @@ func (s *Service) CompleteOAuthAuthentication(ctx context.Context, provider stri
 	if err != nil {
 		return OAuthAuthenticationResult{}, err
 	}
-	if flowState.Provider != normalizedProvider || subtleCompare(flowState.State, strings.TrimSpace(state)) == false || strings.TrimSpace(code) == "" {
+	if flowState.Provider != normalizedProvider || !subtleCompare(flowState.State, strings.TrimSpace(state)) || strings.TrimSpace(code) == "" {
 		return OAuthAuthenticationResult{}, ErrOAuthState
 	}
 	if flowState.LinkUserID != 0 && flowState.LinkUserID != currentUserID {
@@ -719,7 +716,7 @@ func (s *Service) handleFailedLogin(ctx context.Context, user sqlc.User) error {
 		return err
 	}
 
-	if updatedUser.FailedLoginCount >= int32(s.cfg.Security.FailedLoginThreshold) {
+	if int64(updatedUser.FailedLoginCount) >= int64(s.cfg.Security.FailedLoginThreshold) {
 		return s.queries.LockUserUntil(ctx, sqlc.LockUserUntilParams{
 			ID:             user.ID,
 			LockedUntil:    sql.NullTime{Time: time.Now().UTC().Add(100 * 365 * 24 * time.Hour), Valid: true},

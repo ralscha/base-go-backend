@@ -670,8 +670,8 @@ func TestOAuthLinkAddsProviderToCurrentUser(t *testing.T) {
 	if err := json.NewDecoder(startResp.Body).Decode(&startBody); err != nil {
 		t.Fatalf("decode oauth start response: %v", err)
 	}
-	if startBody.Data.Mode != "link" {
-		t.Fatalf("oauth start mode = %q, want %q", startBody.Data.Mode, "link")
+	if startBody.Data.Mode != testOAuthModeLink {
+		t.Fatalf("oauth start mode = %q, want %q", startBody.Data.Mode, testOAuthModeLink)
 	}
 	authorizationURL, err := url.Parse(startBody.Data.AuthorizationURL)
 	if err != nil {
@@ -705,8 +705,8 @@ func TestOAuthLinkAddsProviderToCurrentUser(t *testing.T) {
 	if err := json.NewDecoder(callbackResp.Body).Decode(&callbackBody); err != nil {
 		t.Fatalf("decode oauth link callback response: %v", err)
 	}
-	if callbackBody.Data.Mode != "link" {
-		t.Fatalf("oauth callback mode = %q, want %q", callbackBody.Data.Mode, "link")
+	if callbackBody.Data.Mode != testOAuthModeLink {
+		t.Fatalf("oauth callback mode = %q, want %q", callbackBody.Data.Mode, testOAuthModeLink)
 	}
 	if !callbackBody.Data.Linked {
 		t.Fatal("expected oauth link response to report linked=true")
@@ -790,8 +790,8 @@ func TestOAuthLinkConflictWhenIdentityBelongsToAnotherUser(t *testing.T) {
 	if err := json.NewDecoder(startResp.Body).Decode(&startBody); err != nil {
 		t.Fatalf("decode oauth start response: %v", err)
 	}
-	if startBody.Data.Mode != "link" {
-		t.Fatalf("oauth start mode = %q, want %q", startBody.Data.Mode, "link")
+	if startBody.Data.Mode != testOAuthModeLink {
+		t.Fatalf("oauth start mode = %q, want %q", startBody.Data.Mode, testOAuthModeLink)
 	}
 
 	authorizationURL, err := url.Parse(startBody.Data.AuthorizationURL)
@@ -1001,6 +1001,8 @@ type oauthProviderProfile struct {
 	Name          string
 }
 
+const testOAuthModeLink = "link"
+
 type oauthTestProvider struct {
 	server       *httptest.Server
 	mu           sync.Mutex
@@ -1047,6 +1049,7 @@ func (provider *oauthTestProvider) serveHTTP(w http.ResponseWriter, r *http.Requ
 		redirectTo := redirectURI + "?state=" + url.QueryEscape(state) + "&code=" + url.QueryEscape(code)
 		http.Redirect(w, r, redirectTo, http.StatusFound)
 	case "/oauth/token":
+		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 		if err := r.ParseForm(); err != nil {
 			writeOAuthProviderError(w, http.StatusBadRequest, "invalid form")
 			return
@@ -1188,6 +1191,7 @@ func newRequest(t *testing.T, ctx context.Context, method string, endpoint strin
 func mustDoRequest(t *testing.T, client *http.Client, req *http.Request) *http.Response {
 	t.Helper()
 
+	//nolint:gosec // Test helper only issues requests to in-process httptest servers and controlled local providers.
 	resp, err := client.Do(req)
 	if err != nil {
 		t.Fatalf("client.Do() error = %v", err)

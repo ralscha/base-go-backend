@@ -21,10 +21,12 @@ import (
 	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
 )
 
+const testNewUserEmail = "newuser@example.com"
+
 func TestCurrentUserRequiresAuthentication(t *testing.T) {
 	service := &Service{}
 	_, err := service.CurrentUser(context.Background(), 0)
-	if err != ErrUnauthorized {
+	if !errors.Is(err, ErrUnauthorized) {
 		t.Fatalf("CurrentUser() error = %v, want %v", err, ErrUnauthorized)
 	}
 }
@@ -42,14 +44,14 @@ func TestRegisterCreatesUserRoleVerificationTokenAndEmail(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Register() error = %v", err)
 	}
-	if principal.Username != "newuser" || principal.Email != "newuser@example.com" {
+	if principal.Username != "newuser" || principal.Email != testNewUserEmail {
 		t.Fatalf("principal = %+v, want normalized username/email", principal)
 	}
 	if principal.Verified {
 		t.Fatal("expected new registration to be unverified")
 	}
 
-	user, err := queries.GetUserByEmail(ctx, "newuser@example.com")
+	user, err := queries.GetUserByEmail(ctx, testNewUserEmail)
 	if err != nil {
 		t.Fatalf("GetUserByEmail() error = %v", err)
 	}
@@ -57,7 +59,7 @@ func TestRegisterCreatesUserRoleVerificationTokenAndEmail(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListUserRoleNames() error = %v", err)
 	}
-	if len(roles) != 1 || roles[0] != "user" {
+	if len(roles) != 1 || roles[0] != defaultUserRole {
 		t.Fatalf("roles = %v, want [user]", roles)
 	}
 
@@ -72,7 +74,7 @@ func TestRegisterCreatesUserRoleVerificationTokenAndEmail(t *testing.T) {
 	if len(emails) != 1 {
 		t.Fatalf("pending emails = %d, want 1", len(emails))
 	}
-	if emails[0].Template != "verify-email" || emails[0].Recipient != "newuser@example.com" {
+	if emails[0].Template != "verify-email" || emails[0].Recipient != testNewUserEmail {
 		t.Fatalf("email = %+v, want verify-email to normalized address", emails[0])
 	}
 
@@ -83,7 +85,7 @@ func TestRegisterCreatesUserRoleVerificationTokenAndEmail(t *testing.T) {
 	if err := json.Unmarshal([]byte(emails[0].Payload), &payload); err != nil {
 		t.Fatalf("json.Unmarshal(payload) error = %v", err)
 	}
-	if payload.Token == "" || payload.Email != "newuser@example.com" {
+	if payload.Token == "" || payload.Email != testNewUserEmail {
 		t.Fatalf("payload = %+v, want token and normalized email", payload)
 	}
 
@@ -147,7 +149,11 @@ func TestRequestPasswordResetAndResetPassword(t *testing.T) {
 	service := newAuthTestService(db, queries)
 
 	user := createAuthTestUser(t, ctx, queries, "reset-user", "reset@example.com")
-	if _, err := queries.UpsertPasswordCredential(ctx, sqlc.UpsertPasswordCredentialParams{UserID: user.ID, PasswordHash: "$argon2id$initial"}); err != nil {
+	passwordHash, err := HashPassword("InitialPassword123")
+	if err != nil {
+		t.Fatalf("HashPassword() error = %v", err)
+	}
+	if _, err := queries.UpsertPasswordCredential(ctx, sqlc.UpsertPasswordCredentialParams{UserID: user.ID, PasswordHash: passwordHash}); err != nil {
 		t.Fatalf("UpsertPasswordCredential() error = %v", err)
 	}
 	if err := queries.CreateUserSessionRecord(ctx, sqlc.CreateUserSessionRecordParams{Token: "token-1", UserID: user.ID, DeviceID: "device-1", Expiry: time.Now().UTC().Add(time.Hour)}); err != nil {
@@ -212,7 +218,7 @@ func TestTOTPFlowAndLoginWithRecoveryCode(t *testing.T) {
 		t.Fatalf("HashPassword() error = %v", err)
 	}
 	user := createAuthTestUser(t, ctx, queries, "totp-user", "totp@example.com")
-	addRoleToUser(t, ctx, queries, user.ID, "user")
+	addRoleToUser(t, ctx, queries, user.ID)
 	if _, err := queries.UpsertPasswordCredential(ctx, sqlc.UpsertPasswordCredentialParams{UserID: user.ID, PasswordHash: passwordHash}); err != nil {
 		t.Fatalf("UpsertPasswordCredential() error = %v", err)
 	}
@@ -299,7 +305,7 @@ func TestLoginWithPasswordEdgeCases(t *testing.T) {
 			t.Fatalf("HashPassword() error = %v", err)
 		}
 		user := createAuthTestUser(t, ctx, queries, username, email)
-		addRoleToUser(t, ctx, queries, user.ID, "user")
+		addRoleToUser(t, ctx, queries, user.ID)
 		if _, err := queries.UpsertPasswordCredential(ctx, sqlc.UpsertPasswordCredentialParams{UserID: user.ID, PasswordHash: hash}); err != nil {
 			t.Fatalf("UpsertPasswordCredential() error = %v", err)
 		}
@@ -471,7 +477,7 @@ func TestCurrentUserReturnsRolesAndTOTPFlag(t *testing.T) {
 	service := &Service{queries: queries}
 
 	user := createAuthTestUser(t, ctx, queries, "current-user", "current@example.com")
-	addRoleToUser(t, ctx, queries, user.ID, "user")
+	addRoleToUser(t, ctx, queries, user.ID)
 	if _, err := queries.UpsertTotpConfiguration(ctx, sqlc.UpsertTotpConfigurationParams{
 		UserID:           user.ID,
 		SecretCiphertext: []byte("ciphertext"),
@@ -488,7 +494,7 @@ func TestCurrentUserReturnsRolesAndTOTPFlag(t *testing.T) {
 	if principal.UserID != user.ID || principal.Username != user.Username || principal.Email != user.Email {
 		t.Fatalf("principal = %+v, want user identity fields", principal)
 	}
-	if len(principal.Roles) != 1 || principal.Roles[0] != "user" {
+	if len(principal.Roles) != 1 || principal.Roles[0] != defaultUserRole {
 		t.Fatalf("Roles = %v, want [user]", principal.Roles)
 	}
 	if !principal.TOTPEnabled {
@@ -539,13 +545,13 @@ func TestCompleteUserAuthenticationUpdatesLastLogin(t *testing.T) {
 	service := &Service{queries: queries}
 
 	user := createAuthTestUser(t, ctx, queries, "complete-auth", "complete@example.com")
-	addRoleToUser(t, ctx, queries, user.ID, "user")
+	addRoleToUser(t, ctx, queries, user.ID)
 
 	principal, err := service.completeUserAuthentication(ctx, queries, user.ID, true)
 	if err != nil {
 		t.Fatalf("completeUserAuthentication() error = %v", err)
 	}
-	if principal.UserID != user.ID || len(principal.Roles) != 1 || principal.Roles[0] != "user" {
+	if principal.UserID != user.ID || len(principal.Roles) != 1 || principal.Roles[0] != defaultUserRole {
 		t.Fatalf("principal = %+v, want user principal with role", principal)
 	}
 
@@ -713,7 +719,7 @@ func TestOAuthAuthorizationURLBuildsSessionAndMode(t *testing.T) {
 	if authorizationURL != "https://provider.example/authorize" {
 		t.Fatalf("authorization URL = %q, want fake provider URL", authorizationURL)
 	}
-	if mode != "link" {
+	if mode != oauthModeLink {
 		t.Fatalf("mode = %q, want link", mode)
 	}
 
@@ -756,7 +762,7 @@ func TestCompleteOAuthAuthenticationCreatesUserAndStoresAccount(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CompleteOAuthAuthentication() error = %v", err)
 	}
-	if result.Provider != "test" || result.Mode != "login" || !result.Created || result.Linked {
+	if result.Provider != "test" || result.Mode != oauthModeLogin || !result.Created || result.Linked {
 		t.Fatalf("result = %+v, want created login result", result)
 	}
 	if result.Principal.Email != "oauth-create@example.com" || !result.Principal.Verified {
@@ -777,7 +783,7 @@ func TestCompleteOAuthAuthenticationCreatesUserAndStoresAccount(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListUserRoleNames() error = %v", err)
 	}
-	if len(roles) != 1 || roles[0] != "user" {
+	if len(roles) != 1 || roles[0] != defaultUserRole {
 		t.Fatalf("roles = %v, want [user]", roles)
 	}
 	account, err := queries.GetOAuthAccountByProviderIdentity(ctx, sqlc.GetOAuthAccountByProviderIdentityParams{Provider: "test", ProviderUserID: "provider-user-1"})
@@ -802,7 +808,7 @@ func TestCompleteOAuthAuthenticationLinksExistingUserByEmail(t *testing.T) {
 	service.oauth = map[string]OAuthProviderClient{"test": client}
 
 	user := createAuthTestUser(t, ctx, queries, "oauth-link", "oauth-link@example.com")
-	addRoleToUser(t, ctx, queries, user.ID, "user")
+	addRoleToUser(t, ctx, queries, user.ID)
 	if err := queries.MarkUserEmailVerified(ctx, user.ID); err != nil {
 		t.Fatalf("MarkUserEmailVerified() error = %v", err)
 	}
@@ -841,9 +847,9 @@ func TestCompleteOAuthAuthenticationRejectsLinkedConflict(t *testing.T) {
 	service.oauth = map[string]OAuthProviderClient{"test": client}
 
 	linkedUser := createAuthTestUser(t, ctx, queries, "linked-user", "linked@example.com")
-	addRoleToUser(t, ctx, queries, linkedUser.ID, "user")
+	addRoleToUser(t, ctx, queries, linkedUser.ID)
 	otherUser := createAuthTestUser(t, ctx, queries, "other-user", "other@example.com")
-	addRoleToUser(t, ctx, queries, otherUser.ID, "user")
+	addRoleToUser(t, ctx, queries, otherUser.ID)
 
 	accessToken, err := sealStoredSecret("existing-access-token", service.cfg.Security.EncryptionKey)
 	if err != nil {
@@ -1014,12 +1020,12 @@ func createAuthTestUser(t *testing.T, ctx context.Context, queries *sqlc.Queries
 	return user
 }
 
-func addRoleToUser(t *testing.T, ctx context.Context, queries *sqlc.Queries, userID int64, roleName string) {
+func addRoleToUser(t *testing.T, ctx context.Context, queries *sqlc.Queries, userID int64) {
 	t.Helper()
 
-	role, err := queries.GetRoleByName(ctx, roleName)
+	role, err := queries.GetRoleByName(ctx, defaultUserRole)
 	if err != nil {
-		t.Fatalf("GetRoleByName(%q) error = %v", roleName, err)
+		t.Fatalf("GetRoleByName(%q) error = %v", defaultUserRole, err)
 	}
 	if err := queries.AddUserRole(ctx, sqlc.AddUserRoleParams{UserID: userID, RoleID: role.ID}); err != nil {
 		t.Fatalf("AddUserRole() error = %v", err)

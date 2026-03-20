@@ -72,7 +72,7 @@ func TestPasskeyUserWebAuthnMethods(t *testing.T) {
 	if len(encodedID) != 8 {
 		t.Fatalf("len(WebAuthnID()) = %d, want 8", len(encodedID))
 	}
-	if got := int64(binary.BigEndian.Uint64(encodedID)); got != 42 {
+	if got := binary.BigEndian.Uint64(encodedID); got != uint64(42) {
 		t.Fatalf("WebAuthnID() decodes to %d, want 42", got)
 	}
 }

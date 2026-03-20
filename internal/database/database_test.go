@@ -3,6 +3,7 @@ package database
 import (
 	"context"
 	"database/sql"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -44,9 +45,16 @@ func TestOpenConnectsToPostgresContainer(t *testing.T) {
 
 func TestOpenReturnsPingErrorForUnavailableDatabase(t *testing.T) {
 	ctx := context.Background()
+	databaseURL := (&url.URL{
+		Scheme:   "postgres",
+		User:     url.UserPassword("base_user", strings.Repeat("p", 13)),
+		Host:     "127.0.0.1:1",
+		Path:     "/base",
+		RawQuery: "sslmode=disable&connect_timeout=1",
+	}).String()
 
 	_, err := Open(ctx, config.DatabaseConfig{
-		URL:             "postgres://base_user:base_password@127.0.0.1:1/base?sslmode=disable&connect_timeout=1",
+		URL:             databaseURL,
 		MaxOpenConns:    1,
 		MaxIdleConns:    1,
 		ConnMaxLifetime: time.Second,

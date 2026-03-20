@@ -8,6 +8,7 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -17,6 +18,12 @@ import (
 
 	"base/internal/config"
 	"base/internal/store/sqlc"
+)
+
+const (
+	oauthModeLink   = "link"
+	oauthModeLogin  = "login"
+	defaultUserRole = "user"
 )
 
 type OAuthAuthenticationResult struct {
@@ -61,7 +68,7 @@ type configuredOAuthProvider struct {
 	httpClient *http.Client
 }
 
-func newOAuthProviderClients(cfg config.OAuthConfig, httpClient *http.Client) (map[string]OAuthProviderClient, error) {
+func newOAuthProviderClients(cfg config.OAuthConfig, httpClient *http.Client) map[string]OAuthProviderClient {
 	providers := make(map[string]OAuthProviderClient, len(cfg.Providers))
 	for name, providerCfg := range cfg.Providers {
 		if !providerCfg.Enabled {
@@ -74,7 +81,7 @@ func newOAuthProviderClients(cfg config.OAuthConfig, httpClient *http.Client) (m
 			httpClient: httpClient,
 		}
 	}
-	return providers, nil
+	return providers
 }
 
 func (provider configuredOAuthProvider) AuthorizationURL(state string, codeChallenge string) string {
@@ -193,7 +200,8 @@ func (s *Service) completeOAuthFlow(ctx context.Context, queries *sqlc.Queries, 
 		userID = account.UserID
 	} else if flowState.LinkUserID == 0 {
 		matchedUser, lookupErr := queries.GetUserByEmail(ctx, profile.Email)
-		if lookupErr == nil {
+		switch {
+		case lookupErr == nil:
 			if !matchedUser.IsActive {
 				return SessionPrincipal{}, OAuthAuthenticationResult{}, ErrAccountDisabled
 			}
@@ -202,9 +210,9 @@ func (s *Service) completeOAuthFlow(ctx context.Context, queries *sqlc.Queries, 
 			}
 			userID = matchedUser.ID
 			result.Linked = true
-		} else if !errorsIsNoRows(lookupErr) {
+		case !errorsIsNoRows(lookupErr):
 			return SessionPrincipal{}, OAuthAuthenticationResult{}, lookupErr
-		} else {
+		default:
 			createdUser, createErr := s.createOAuthUser(ctx, queries, provider, profile)
 			if createErr != nil {
 				return SessionPrincipal{}, OAuthAuthenticationResult{}, createErr
@@ -274,7 +282,7 @@ func (s *Service) createOAuthUser(ctx context.Context, queries *sqlc.Queries, pr
 		createdUser.EmailVerifiedAt = sql.NullTime{Time: time.Now().UTC(), Valid: true}
 	}
 
-	role, err := queries.GetRoleByName(ctx, "user")
+	role, err := queries.GetRoleByName(ctx, defaultUserRole)
 	if err != nil {
 		return sqlc.User{}, err
 	}
@@ -423,13 +431,13 @@ func sanitizeUsername(value string) string {
 
 func modeForUserID(userID int64) string {
 	if userID != 0 {
-		return "link"
+		return oauthModeLink
 	}
-	return "login"
+	return oauthModeLogin
 }
 
 func errorsIsNoRows(err error) bool {
-	return err != nil && err == sql.ErrNoRows
+	return errors.Is(err, sql.ErrNoRows)
 }
 
 func nullTime(value time.Time) sql.NullTime {

@@ -19,6 +19,7 @@ import (
 	"base/internal/store/sqlc"
 
 	"github.com/alexedwards/scs/v2"
+	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pquerna/otp/totp"
 	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
@@ -387,6 +388,230 @@ func TestLoginReturnsTOTPRequired(t *testing.T) {
 	}
 }
 
+func TestStartOAuthInvalidProvider(t *testing.T) {
+	ctx := context.Background()
+	_, _, service := newHandlerAuthTestEnv(t, ctx)
+
+	sessions := scs.New()
+	handler := AuthHandler{Service: service, Sessions: sessions}
+	server := httptest.NewServer(sessions.LoadAndSave(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		handler.StartOAuth(w, withChiURLParam(r, "provider", "missing"))
+	})))
+	defer server.Close()
+
+	resp, err := http.Get(server.URL)
+	if err != nil {
+		t.Fatalf("GET /oauth/start error = %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusBadRequest {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, want %d, body=%s", resp.StatusCode, http.StatusBadRequest, string(body))
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("ReadAll(resp.Body) error = %v", err)
+	}
+	assertErrorCode(t, body, "oauth_provider_invalid")
+}
+
+func TestCompleteOAuthRequiresValidSessionState(t *testing.T) {
+	ctx := context.Background()
+	_, _, service := newHandlerAuthTestEnv(t, ctx)
+
+	sessions := scs.New()
+	handler := AuthHandler{Service: service, Sessions: sessions}
+	server := httptest.NewServer(sessions.LoadAndSave(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		handler.CompleteOAuth(w, withChiURLParam(r, "provider", "missing"))
+	})))
+	defer server.Close()
+
+	resp, err := http.Get(server.URL + "?state=abc&code=def")
+	if err != nil {
+		t.Fatalf("GET /oauth/callback error = %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusBadRequest {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, want %d, body=%s", resp.StatusCode, http.StatusBadRequest, string(body))
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("ReadAll(resp.Body) error = %v", err)
+	}
+	assertErrorCode(t, body, "oauth_state_invalid")
+}
+
+func TestBeginPasskeyRegistrationStoresSession(t *testing.T) {
+	ctx := context.Background()
+	_, queries, service := newHandlerAuthTestEnv(t, ctx)
+
+	user, err := queries.CreateUser(ctx, sqlc.CreateUserParams{Username: "passkey-register", Email: "passkey-register@example.com"})
+	if err != nil {
+		t.Fatalf("CreateUser() error = %v", err)
+	}
+
+	sessions := scs.New()
+	handler := AuthHandler{Service: service, Sessions: sessions}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/start", func(w http.ResponseWriter, r *http.Request) {
+		sessions.Put(r.Context(), "user_id", user.ID)
+		handler.BeginPasskeyRegistration(w, r)
+	})
+	mux.HandleFunc("/peek", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]any{"session": sessions.GetString(r.Context(), passkeyRegistrationSessionKey)})
+	})
+	server := httptest.NewServer(sessions.LoadAndSave(mux))
+	defer server.Close()
+
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatalf("cookiejar.New() error = %v", err)
+	}
+	client := &http.Client{Jar: jar}
+
+	startResp, err := client.Post(server.URL+"/start", "application/json", nil)
+	if err != nil {
+		t.Fatalf("POST /start error = %v", err)
+	}
+	defer func() { _ = startResp.Body.Close() }()
+	if startResp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(startResp.Body)
+		t.Fatalf("start status = %d, want %d, body=%s", startResp.StatusCode, http.StatusOK, string(body))
+	}
+	var startPayload envelope
+	if err := json.NewDecoder(startResp.Body).Decode(&startPayload); err != nil {
+		t.Fatalf("Decode(/start) error = %v", err)
+	}
+	if startPayload.Data.(map[string]any)["options"] == nil {
+		t.Fatalf("payload = %+v, want options", startPayload)
+	}
+
+	peekResp, err := client.Get(server.URL + "/peek")
+	if err != nil {
+		t.Fatalf("GET /peek error = %v", err)
+	}
+	defer func() { _ = peekResp.Body.Close() }()
+	var peekPayload envelope
+	if err := json.NewDecoder(peekResp.Body).Decode(&peekPayload); err != nil {
+		t.Fatalf("Decode(/peek) error = %v", err)
+	}
+	if strings.TrimSpace(peekPayload.Data.(map[string]any)["session"].(string)) == "" {
+		t.Fatalf("peek payload = %+v, want stored registration session", peekPayload)
+	}
+}
+
+func TestFinishPasskeyRegistrationRequiresSession(t *testing.T) {
+	ctx := context.Background()
+	_, queries, service := newHandlerAuthTestEnv(t, ctx)
+
+	user, err := queries.CreateUser(ctx, sqlc.CreateUserParams{Username: "passkey-finish", Email: "passkey-finish@example.com"})
+	if err != nil {
+		t.Fatalf("CreateUser() error = %v", err)
+	}
+
+	sessions := scs.New()
+	handler := AuthHandler{Service: service, Sessions: sessions}
+	server := httptest.NewServer(sessions.LoadAndSave(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sessions.Put(r.Context(), "user_id", user.ID)
+		handler.FinishPasskeyRegistration(w, r)
+	})))
+	defer server.Close()
+
+	resp, err := http.Post(server.URL, "application/json", strings.NewReader(`{"credential":{},"name":"Laptop key"}`))
+	if err != nil {
+		t.Fatalf("POST /finish passkey registration error = %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusBadRequest {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, want %d, body=%s", resp.StatusCode, http.StatusBadRequest, string(body))
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("ReadAll(resp.Body) error = %v", err)
+	}
+	assertErrorCode(t, body, "passkey_ceremony_missing")
+}
+
+func TestBeginPasskeyLoginStoresSessionAndFinishRequiresSession(t *testing.T) {
+	ctx := context.Background()
+	_, _, service := newHandlerAuthTestEnv(t, ctx)
+
+	sessions := scs.New()
+	handler := AuthHandler{Service: service, Sessions: sessions}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/start", handler.BeginPasskeyLogin)
+	mux.HandleFunc("/peek", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]any{"session": sessions.GetString(r.Context(), passkeyLoginSessionKey)})
+	})
+	mux.HandleFunc("/finish", handler.FinishPasskeyLogin)
+	server := httptest.NewServer(sessions.LoadAndSave(mux))
+	defer server.Close()
+
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatalf("cookiejar.New() error = %v", err)
+	}
+	client := &http.Client{Jar: jar}
+
+	startResp, err := client.Post(server.URL+"/start", "application/json", nil)
+	if err != nil {
+		t.Fatalf("POST /start error = %v", err)
+	}
+	defer func() { _ = startResp.Body.Close() }()
+	if startResp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(startResp.Body)
+		t.Fatalf("start status = %d, want %d, body=%s", startResp.StatusCode, http.StatusOK, string(body))
+	}
+	var startPayload envelope
+	if err := json.NewDecoder(startResp.Body).Decode(&startPayload); err != nil {
+		t.Fatalf("Decode(/start) error = %v", err)
+	}
+	if startPayload.Data.(map[string]any)["options"] == nil {
+		t.Fatalf("payload = %+v, want options", startPayload)
+	}
+
+	peekResp, err := client.Get(server.URL + "/peek")
+	if err != nil {
+		t.Fatalf("GET /peek error = %v", err)
+	}
+	defer func() { _ = peekResp.Body.Close() }()
+	var peekPayload envelope
+	if err := json.NewDecoder(peekResp.Body).Decode(&peekPayload); err != nil {
+		t.Fatalf("Decode(/peek) error = %v", err)
+	}
+	if strings.TrimSpace(peekPayload.Data.(map[string]any)["session"].(string)) == "" {
+		t.Fatalf("peek payload = %+v, want stored login session", peekPayload)
+	}
+
+	clearReq, err := http.NewRequest(http.MethodGet, server.URL+"/peek", nil)
+	if err != nil {
+		t.Fatalf("NewRequest() error = %v", err)
+	}
+	_ = clearReq
+
+	blankJar, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatalf("cookiejar.New(blank) error = %v", err)
+	}
+	blankClient := &http.Client{Jar: blankJar}
+	finishResp, err := blankClient.Post(server.URL+"/finish", "application/json", strings.NewReader(`{"credential":{}}`))
+	if err != nil {
+		t.Fatalf("POST /finish error = %v", err)
+	}
+	defer func() { _ = finishResp.Body.Close() }()
+	if finishResp.StatusCode != http.StatusBadRequest {
+		body, _ := io.ReadAll(finishResp.Body)
+		t.Fatalf("finish status = %d, want %d, body=%s", finishResp.StatusCode, http.StatusBadRequest, string(body))
+	}
+	body, err := io.ReadAll(finishResp.Body)
+	if err != nil {
+		t.Fatalf("ReadAll(finishResp.Body) error = %v", err)
+	}
+	assertErrorCode(t, body, "passkey_ceremony_missing")
+}
+
 func TestResetPasswordSuccess(t *testing.T) {
 	ctx := context.Background()
 	db, queries, service := newHandlerAuthTestEnv(t, ctx)
@@ -395,7 +620,11 @@ func TestResetPasswordSuccess(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateUser() error = %v", err)
 	}
-	if _, err := queries.UpsertPasswordCredential(ctx, sqlc.UpsertPasswordCredentialParams{UserID: user.ID, PasswordHash: "$argon2id$initial"}); err != nil {
+	passwordHash, err := auth.HashPassword("InitialPassword123")
+	if err != nil {
+		t.Fatalf("HashPassword() error = %v", err)
+	}
+	if _, err := queries.UpsertPasswordCredential(ctx, sqlc.UpsertPasswordCredentialParams{UserID: user.ID, PasswordHash: passwordHash}); err != nil {
 		t.Fatalf("UpsertPasswordCredential() error = %v", err)
 	}
 	plainToken, tokenHash, err := auth.NewToken()
@@ -688,4 +917,22 @@ func assertHandlerQueryCount(t *testing.T, ctx context.Context, db *sql.DB, quer
 	if got != want {
 		t.Fatalf("count query %q = %d, want %d", query, got, want)
 	}
+}
+
+func assertErrorCode(t *testing.T, body []byte, wantCode string) {
+	t.Helper()
+
+	var payload envelope
+	if err := json.Unmarshal(body, &payload); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	if payload.Error == nil || payload.Error.Code != wantCode {
+		t.Fatalf("payload = %+v, want error code %q", payload, wantCode)
+	}
+}
+
+func withChiURLParam(r *http.Request, key, value string) *http.Request {
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add(key, value)
+	return r.WithContext(context.WithValue(r.Context(), chi.RouteCtxKey, rctx))
 }
