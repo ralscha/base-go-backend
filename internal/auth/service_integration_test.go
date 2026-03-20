@@ -82,7 +82,7 @@ func TestRegisterCreatesUserRoleVerificationTokenAndEmail(t *testing.T) {
 		Token string `json:"token"`
 		Email string `json:"email"`
 	}
-	if err := json.Unmarshal([]byte(emails[0].Payload), &payload); err != nil {
+	if err := json.Unmarshal(emails[0].Payload, &payload); err != nil {
 		t.Fatalf("json.Unmarshal(payload) error = %v", err)
 	}
 	if payload.Token == "" || payload.Email != testNewUserEmail {
@@ -173,7 +173,7 @@ func TestRequestPasswordResetAndResetPassword(t *testing.T) {
 		Token string `json:"token"`
 		Email string `json:"email"`
 	}
-	if err := json.Unmarshal([]byte(emails[0].Payload), &payload); err != nil {
+	if err := json.Unmarshal(emails[0].Payload, &payload); err != nil {
 		t.Fatalf("json.Unmarshal(payload) error = %v", err)
 	}
 	if payload.Token == "" || payload.Email != user.Email {
@@ -422,7 +422,7 @@ func TestRequestAccountRecoveryAndRecoverAccount(t *testing.T) {
 		Token string `json:"token"`
 		Email string `json:"email"`
 	}
-	if err := json.Unmarshal([]byte(emails[0].Payload), &payload); err != nil {
+	if err := json.Unmarshal(emails[0].Payload, &payload); err != nil {
 		t.Fatalf("json.Unmarshal(payload) error = %v", err)
 	}
 	if payload.Token == "" || payload.Email != user.Email {
@@ -554,7 +554,7 @@ func TestPasskeyBeginFlowsGenerateSessions(t *testing.T) {
 	if err := service.FinishPasskeyRegistration(ctx, user.ID, nil, []byte(`{}`), "Laptop key"); !errors.Is(err, ErrPasskeyCeremony) {
 		t.Fatalf("FinishPasskeyRegistration() error = %v, want %v", err, ErrPasskeyCeremony)
 	}
-	if _, err := service.FinishPasskeyLogin(ctx, nil, []byte(`{}`), "", "agent", "127.0.0.1"); !errors.Is(err, ErrPasskeyCeremony) {
+	if _, err := service.FinishPasskeyLogin(ctx, nil, []byte(`{}`), ""); !errors.Is(err, ErrPasskeyCeremony) {
 		t.Fatalf("FinishPasskeyLogin() error = %v, want %v", err, ErrPasskeyCeremony)
 	}
 }

@@ -11,7 +11,6 @@ import (
 
 	"base/internal/config"
 	"base/internal/database"
-	"base/internal/store/dbtype"
 	"base/internal/store/sqlc"
 
 	wa "github.com/go-webauthn/webauthn/webauthn"
@@ -168,7 +167,7 @@ func (s *Service) Register(ctx context.Context, input RegisterInput) (SessionPri
 			Template:    "verify-email",
 			Recipient:   user.Email,
 			Subject:     "Verify your account",
-			Payload:     dbtype.RawMessage(payload),
+			Payload:     payload,
 			AvailableAt: time.Now().UTC(),
 		}); err != nil {
 			return err
@@ -350,7 +349,7 @@ func (s *Service) RequestPasswordReset(ctx context.Context, email string) error 
 			Template:    "password-reset",
 			Recipient:   user.Email,
 			Subject:     "Reset your password",
-			Payload:     dbtype.RawMessage(payload),
+			Payload:     payload,
 			AvailableAt: time.Now().UTC(),
 		})
 		return err
@@ -392,7 +391,7 @@ func (s *Service) RequestAccountRecovery(ctx context.Context, email string) erro
 			Template:    "account-recovery",
 			Recipient:   user.Email,
 			Subject:     "Recover your account",
-			Payload:     dbtype.RawMessage(payload),
+			Payload:     payload,
 			AvailableAt: time.Now().UTC(),
 		})
 		return err

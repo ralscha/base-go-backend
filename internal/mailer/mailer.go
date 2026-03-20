@@ -107,7 +107,7 @@ func buildMessage(from, to, subject, body string) []byte {
 func renderBody(email sqlc.EmailOutbox) (string, error) {
 	var payload map[string]any
 	if len(email.Payload) > 0 {
-		if err := json.Unmarshal([]byte(email.Payload), &payload); err != nil {
+		if err := json.Unmarshal(email.Payload, &payload); err != nil {
 			return "", fmt.Errorf("decode email payload: %w", err)
 		}
 	}

@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -109,7 +110,7 @@ func (a *App) Run(ctx context.Context) error {
 	errCh := make(chan error, 1)
 	go func() {
 		a.logger.Info("http server listening", slog.String("address", a.server.Addr))
-		if err := a.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		if err := a.server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
 			return
 		}

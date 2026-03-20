@@ -12,7 +12,6 @@ import (
 	"net/http"
 	"strings"
 
-	"base/internal/store/dbtype"
 	"base/internal/store/sqlc"
 
 	"github.com/go-webauthn/webauthn/protocol"
@@ -77,7 +76,7 @@ func (s *Service) BeginPasskeyLogin() (*protocol.CredentialAssertion, []byte, er
 	return options, sessionJSON, nil
 }
 
-func (s *Service) FinishPasskeyLogin(ctx context.Context, sessionJSON, credentialJSON []byte, totpCode, userAgent, ipAddress string) (SessionPrincipal, error) {
+func (s *Service) FinishPasskeyLogin(ctx context.Context, sessionJSON, credentialJSON []byte, totpCode string) (SessionPrincipal, error) {
 	session, err := decodePasskeySession(sessionJSON)
 	if err != nil {
 		return SessionPrincipal{}, err
@@ -226,7 +225,7 @@ func (s *Service) persistPasskeyCredential(ctx context.Context, userID int64, cr
 		CloneWarning:        credential.Authenticator.CloneWarning,
 		Transports:          transports,
 		Name:                sql.NullString{String: name, Valid: true},
-		CredentialData:      dbtype.RawMessage(credentialData),
+		CredentialData:      credentialData,
 	})
 
 	return err
@@ -260,14 +259,14 @@ func (s *Service) updatePasskeyCredential(ctx context.Context, credential *wa.Cr
 		SignCount:           int64(credential.Authenticator.SignCount),
 		CloneWarning:        credential.Authenticator.CloneWarning,
 		Transports:          transports,
-		CredentialData:      dbtype.RawMessage(credentialData),
+		CredentialData:      credentialData,
 	})
 }
 
 func credentialFromRow(row sqlc.PasskeyCredential) wa.Credential {
 	if len(row.CredentialData) > 0 && string(row.CredentialData) != "{}" {
 		var credential wa.Credential
-		if err := json.Unmarshal([]byte(row.CredentialData), &credential); err == nil {
+		if err := json.Unmarshal(row.CredentialData, &credential); err == nil {
 			return credential
 		}
 	}

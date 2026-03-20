@@ -163,8 +163,8 @@ func Load() (Config, error) {
 	}
 
 	const defaultEncryptionKey = "0123456789abcdef0123456789abcdef"
-	env := strings.ToLower(cfg.App.Env)
-	if cfg.Security.EncryptionKey == defaultEncryptionKey && env != "development" && env != "test" {
+	appEnv := strings.ToLower(cfg.App.Env)
+	if cfg.Security.EncryptionKey == defaultEncryptionKey && appEnv != "development" && appEnv != "test" {
 		return Config{}, fmt.Errorf("security.encryption_key must be changed from the default value in non-development environments")
 	}
 

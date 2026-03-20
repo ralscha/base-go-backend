@@ -14,75 +14,6 @@ import (
 	"base/internal/validation"
 )
 
-func TestDecodeJSONRejectsInvalidBody(t *testing.T) {
-	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"unexpected":true}`))
-
-	var payload struct {
-		Expected string `json:"expected"`
-	}
-	err := decodeJSON(recorder, request, &payload)
-	if err == nil {
-		t.Fatal("decodeJSON() error = nil, want invalid JSON error")
-	}
-	if recorder.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusBadRequest)
-	}
-
-	var response envelope
-	if unmarshalErr := json.Unmarshal(recorder.Body.Bytes(), &response); unmarshalErr != nil {
-		t.Fatalf("json.Unmarshal() error = %v", unmarshalErr)
-	}
-	if response.Error == nil || response.Error.Code != "invalid_json" {
-		t.Fatalf("response = %+v, want invalid_json error", response)
-	}
-}
-
-func TestDecodeJSONParsesValidBody(t *testing.T) {
-	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"expected":"value"}`))
-
-	var payload struct {
-		Expected string `json:"expected"`
-	}
-	if err := decodeJSON(recorder, request, &payload); err != nil {
-		t.Fatalf("decodeJSON() error = %v", err)
-	}
-	if payload.Expected != "value" {
-		t.Fatalf("payload.Expected = %q, want value", payload.Expected)
-	}
-	if recorder.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusOK)
-	}
-}
-
-func TestWriteValidationError(t *testing.T) {
-	recorder := httptest.NewRecorder()
-	validationErr := validation.New()
-	validationErr.Add("email", "required")
-
-	writeValidationError(recorder, validationErr)
-
-	if recorder.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusBadRequest)
-	}
-
-	var response envelope
-	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
-		t.Fatalf("json.Unmarshal() error = %v", err)
-	}
-	if response.Error == nil {
-		t.Fatal("response.Error = nil, want error payload")
-	}
-	if response.Error.Code != "validation_failed" || response.Error.Message != "email is required" {
-		t.Fatalf("response.Error = %+v, want code=%q message=%q", response.Error, "validation_failed", "email is required")
-	}
-	wantFields := validation.FieldErrors{"email": map[string]any{"required": true}}
-	if !reflect.DeepEqual(response.Error.Fields, wantFields) {
-		t.Fatalf("response.Error.Fields = %+v, want %+v", response.Error.Fields, wantFields)
-	}
-}
-
 func TestValidationHelpers(t *testing.T) {
 	testCases := []struct {
 		name     string
@@ -90,20 +21,20 @@ func TestValidationHelpers(t *testing.T) {
 		wantErr  string
 		wantMap  validation.FieldErrors
 	}{
-		{name: "register missing username", validate: func() error { return registerRequest{Email: "user@example.com", Password: "Password12345"}.validate() }, wantErr: "username is required", wantMap: validation.FieldErrors{"username": map[string]any{"required": true}}},
+		{name: "register missing username", validate: func() error { return registerRequest{Email: "user@example.com", Password: "Password12345"}.Validate() }, wantErr: "username is required", wantMap: validation.FieldErrors{"username": map[string]any{"required": true}}},
 		{name: "register invalid username and password", validate: func() error {
-			return registerRequest{Username: "ab", Email: "user@example.com", Password: "short"}.validate()
+			return registerRequest{Username: "ab", Email: "user@example.com", Password: "short"}.Validate()
 		}, wantErr: "request validation failed", wantMap: validation.FieldErrors{"username": map[string]any{"minlength": map[string]any{"requiredLength": minUsernameLength, "actualLength": 2}}, "password": map[string]any{"minlength": map[string]any{"requiredLength": minPasswordLength, "actualLength": 5}}}},
 		{name: "register invalid email", validate: func() error {
-			return registerRequest{Username: "user", Email: "invalid", Password: "Password12345"}.validate()
+			return registerRequest{Username: "user", Email: "invalid", Password: "Password12345"}.Validate()
 		}, wantErr: "email must be a valid email address", wantMap: validation.FieldErrors{"email": map[string]any{"email": true}}},
 		{name: "login invalid totp", validate: func() error {
-			return loginRequest{Email: "user@example.com", Password: "Password12345", TOTPCode: "12ab"}.validate()
+			return loginRequest{Email: "user@example.com", Password: "Password12345", TOTPCode: "12ab"}.Validate()
 		}, wantErr: "totp_code format is invalid", wantMap: validation.FieldErrors{"totp_code": map[string]any{"pattern": map[string]any{"requiredPattern": `^[0-9]{6}$`}}}},
-		{name: "email only invalid", validate: func() error { return emailRequest{Email: "not-an-email"}.validate() }, wantErr: "email must be a valid email address", wantMap: validation.FieldErrors{"email": map[string]any{"email": true}}},
-		{name: "token password missing token", validate: func() error { return tokenPasswordRequest{Password: "Password12345"}.validate() }, wantErr: "token is required", wantMap: validation.FieldErrors{"token": map[string]any{"required": true}}},
-		{name: "totp setup missing code", validate: func() error { return enableTOTPRequest{Code: " "}.validate() }, wantErr: "code is required", wantMap: validation.FieldErrors{"code": map[string]any{"required": true}}},
-		{name: "passkey missing credential", validate: func() error { return passkeyRegistrationRequest{}.validate() }, wantErr: "credential is required", wantMap: validation.FieldErrors{"credential": map[string]any{"required": true}}},
+		{name: "email only invalid", validate: func() error { return emailRequest{Email: "not-an-email"}.Validate() }, wantErr: "email must be a valid email address", wantMap: validation.FieldErrors{"email": map[string]any{"email": true}}},
+		{name: "token password missing token", validate: func() error { return tokenPasswordRequest{Password: "Password12345"}.Validate() }, wantErr: "token is required", wantMap: validation.FieldErrors{"token": map[string]any{"required": true}}},
+		{name: "totp setup missing code", validate: func() error { return enableTOTPRequest{Code: " "}.Validate() }, wantErr: "code is required", wantMap: validation.FieldErrors{"code": map[string]any{"required": true}}},
+		{name: "passkey missing credential", validate: func() error { return passkeyRegistrationRequest{}.Validate() }, wantErr: "credential is required", wantMap: validation.FieldErrors{"credential": map[string]any{"required": true}}},
 	}
 
 	for _, testCase := range testCases {
@@ -126,8 +57,8 @@ func TestValidationHelpers(t *testing.T) {
 	}
 
 	valid := registerRequest{Username: "user", Email: "user@example.com", Password: "Password12345"}
-	if err := valid.validate(); err != nil {
-		t.Fatalf("registerRequest.validate() error = %v, want nil", err)
+	if err := valid.Validate(); err != nil {
+		t.Fatalf("registerRequest.Validate() error = %v, want nil", err)
 	}
 }
 
@@ -165,7 +96,7 @@ func TestHandleAuthErrorMappings(t *testing.T) {
 				t.Fatalf("status = %d, want %d", recorder.Code, testCase.status)
 			}
 
-			var response envelope
+			var response testEnvelope
 			if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
 				t.Fatalf("json.Unmarshal() error = %v", err)
 			}
@@ -199,7 +130,7 @@ func TestHandlePasswordLoginErrorMasksCredentialFailures(t *testing.T) {
 				t.Fatalf("status = %d, want %d", recorder.Code, http.StatusUnauthorized)
 			}
 
-			var response envelope
+			var response testEnvelope
 			if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
 				t.Fatalf("json.Unmarshal() error = %v", err)
 			}
@@ -234,7 +165,7 @@ func TestHandlePasswordLoginErrorPreservesSecondFactorErrors(t *testing.T) {
 				t.Fatalf("status = %d, want %d", recorder.Code, testCase.status)
 			}
 
-			var response envelope
+			var response testEnvelope
 			if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
 				t.Fatalf("json.Unmarshal() error = %v", err)
 			}
@@ -271,7 +202,7 @@ func TestVerifyEmailRequiresToken(t *testing.T) {
 		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusBadRequest)
 	}
 
-	var response envelope
+	var response testEnvelope
 	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
 		t.Fatalf("json.Unmarshal() error = %v", err)
 	}
@@ -304,7 +235,7 @@ func TestHandlerMethodsRejectInvalidJSON(t *testing.T) {
 				t.Fatalf("status = %d, want %d", recorder.Code, http.StatusBadRequest)
 			}
 
-			var response envelope
+			var response testEnvelope
 			if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
 				t.Fatalf("json.Unmarshal() error = %v", err)
 			}
@@ -343,7 +274,7 @@ func TestHandlerMethodsRejectInvalidPayloads(t *testing.T) {
 				t.Fatalf("status = %d, want %d", recorder.Code, http.StatusBadRequest)
 			}
 
-			var response envelope
+			var response testEnvelope
 			if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
 				t.Fatalf("json.Unmarshal() error = %v", err)
 			}
@@ -363,7 +294,7 @@ func TestHandlerMethodsRejectInvalidPayloads(t *testing.T) {
 func TestRequireJSONValueAcceptsStructuredJSON(t *testing.T) {
 	credential := json.RawMessage(fmt.Appendf(nil, `{%q:%q}`, "id", "cred"))
 
-	if err := (passkeyRegistrationRequest{Credential: credential}).validate(); err != nil {
-		t.Fatalf("passkeyRegistrationRequest.validate() error = %v, want nil", err)
+	if err := (passkeyRegistrationRequest{Credential: credential}).Validate(); err != nil {
+		t.Fatalf("passkeyRegistrationRequest.Validate() error = %v, want nil", err)
 	}
 }

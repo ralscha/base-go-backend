@@ -2,17 +2,18 @@ package handlers
 
 import (
 	"database/sql"
-	"encoding/json"
 	"net/http"
 	"time"
+
+	"base/internal/httpapi/jsonio"
 )
 
 type HealthHandler struct {
 	DB *sql.DB
 }
 
-func (h HealthHandler) Live(w http.ResponseWriter, r *http.Request) {
-	respondJSON(w, http.StatusOK, map[string]any{
+func (h HealthHandler) Live(w http.ResponseWriter, _ *http.Request) {
+	jsonio.WriteJSON(w, http.StatusOK, map[string]any{
 		"status": "ok",
 		"time":   time.Now().UTC(),
 	})
@@ -20,20 +21,14 @@ func (h HealthHandler) Live(w http.ResponseWriter, r *http.Request) {
 
 func (h HealthHandler) Ready(w http.ResponseWriter, r *http.Request) {
 	if err := h.DB.PingContext(r.Context()); err != nil {
-		respondJSON(w, http.StatusServiceUnavailable, map[string]any{
+		jsonio.WriteJSON(w, http.StatusServiceUnavailable, map[string]any{
 			"status": "degraded",
 			"error":  "database unavailable",
 		})
 		return
 	}
 
-	respondJSON(w, http.StatusOK, map[string]any{
+	jsonio.WriteJSON(w, http.StatusOK, map[string]any{
 		"status": "ready",
 	})
-}
-
-func respondJSON(w http.ResponseWriter, status int, payload any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(payload)
 }

@@ -93,7 +93,7 @@ func TestAccountRecoveryFlowReactivatesUserAndClearsTOTP(t *testing.T) {
 		Token string `json:"token"`
 		Email string `json:"email"`
 	}
-	if err := json.Unmarshal([]byte(emails[0].Payload), &emailPayload); err != nil {
+	if err := json.Unmarshal(emails[0].Payload, &emailPayload); err != nil {
 		t.Fatalf("json.Unmarshal(email payload) error = %v", err)
 	}
 	if emailPayload.Token == "" {
@@ -194,7 +194,7 @@ func TestAccountRecoveryTokenCannotBeReused(t *testing.T) {
 	var emailPayload struct {
 		Token string `json:"token"`
 	}
-	if err := json.Unmarshal([]byte(emails[0].Payload), &emailPayload); err != nil {
+	if err := json.Unmarshal(emails[0].Payload, &emailPayload); err != nil {
 		t.Fatalf("json.Unmarshal(email payload) error = %v", err)
 	}
 
@@ -276,7 +276,7 @@ func TestExpiredAccountRecoveryTokenIsRejected(t *testing.T) {
 	var emailPayload struct {
 		Token string `json:"token"`
 	}
-	if err := json.Unmarshal([]byte(emails[0].Payload), &emailPayload); err != nil {
+	if err := json.Unmarshal(emails[0].Payload, &emailPayload); err != nil {
 		t.Fatalf("json.Unmarshal(email payload) error = %v", err)
 	}
 

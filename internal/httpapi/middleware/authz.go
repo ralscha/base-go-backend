@@ -2,12 +2,12 @@ package middleware
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
 	"slices"
 	"time"
 
 	internalcache "base/internal/cache"
+	"base/internal/httpapi/jsonio"
 
 	"github.com/alexedwards/scs/v2"
 )
@@ -34,7 +34,6 @@ func RequireAuthenticated(sessions *scs.SessionManager) func(http.Handler) http.
 }
 
 func RequireRoles(sessions *scs.SessionManager, resolveRoles RoleResolver, roleCache *internalcache.Cache[int64, []string], required ...string) func(http.Handler) http.Handler {
-
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			userID := sessions.GetInt64(r.Context(), "user_id")
@@ -80,19 +79,10 @@ func resolveRoleNames(ctx context.Context, userID int64, resolveRoles RoleResolv
 	return append([]string(nil), roles...), nil
 }
 
-func cloneStringSlice(values []string) []string {
-	return append([]string(nil), values...)
-}
-
 func contains(items []string, wanted string) bool {
 	return slices.Contains(items, wanted)
 }
 
 func writeAuthzError(w http.ResponseWriter, status int, code, message string) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	var payload apiError
-	payload.Error.Code = code
-	payload.Error.Message = message
-	_ = json.NewEncoder(w).Encode(payload)
+	jsonio.WriteError(w, status, code, message)
 }

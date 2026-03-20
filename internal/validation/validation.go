@@ -24,10 +24,12 @@ type Errors struct {
 	fields FieldErrors
 }
 
-func (e *Errors) NotBlank(field, value string) {
+func (e *Errors) NotBlank(field, value string) bool {
 	if strings.TrimSpace(value) == "" {
 		e.Add(field, codeRequired)
+		return true
 	}
+	return false
 }
 
 func (e *Errors) MinRunes(field, value string, min int) {

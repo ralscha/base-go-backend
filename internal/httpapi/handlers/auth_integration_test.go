@@ -17,6 +17,7 @@ import (
 	"base/internal/auth"
 	"base/internal/config"
 	"base/internal/database"
+	"base/internal/httpapi/jsonio"
 	"base/internal/store/sqlc"
 	"base/internal/testutil"
 
@@ -25,6 +26,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pquerna/otp/totp"
 )
+
+type envelope = testEnvelope
 
 const handlerTestValidPassword = "ValidPassword123"
 
@@ -37,7 +40,7 @@ func TestLogoutDestroysSession(t *testing.T) {
 		w.WriteHeader(http.StatusNoContent)
 	})
 	mux.HandleFunc("/check", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, http.StatusOK, map[string]any{"user_id": sessions.GetInt64(r.Context(), "user_id")})
+		jsonio.WriteJSON(w, http.StatusOK, map[string]any{"user_id": sessions.GetInt64(r.Context(), "user_id")})
 	})
 	mux.HandleFunc("/logout", handler.Logout)
 	server := httptest.NewServer(sessions.LoadAndSave(mux))
@@ -576,7 +579,7 @@ func TestBeginPasskeyRegistrationStoresSession(t *testing.T) {
 		handler.BeginPasskeyRegistration(w, r)
 	})
 	mux.HandleFunc("/peek", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, http.StatusOK, map[string]any{"session": sessions.GetString(r.Context(), passkeyRegistrationSessionKey)})
+		jsonio.WriteJSON(w, http.StatusOK, map[string]any{"session": sessions.GetString(r.Context(), passkeyRegistrationSessionKey)})
 	})
 	server := httptest.NewServer(sessions.LoadAndSave(mux))
 	defer server.Close()
@@ -660,7 +663,7 @@ func TestBeginPasskeyLoginStoresSessionAndFinishRequiresSession(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/start", handler.BeginPasskeyLogin)
 	mux.HandleFunc("/peek", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, http.StatusOK, map[string]any{"session": sessions.GetString(r.Context(), passkeyLoginSessionKey)})
+		jsonio.WriteJSON(w, http.StatusOK, map[string]any{"session": sessions.GetString(r.Context(), passkeyLoginSessionKey)})
 	})
 	mux.HandleFunc("/finish", handler.FinishPasskeyLogin)
 	server := httptest.NewServer(sessions.LoadAndSave(mux))
@@ -925,7 +928,7 @@ func TestRequestAccountRecoveryAcceptedAndRecoverAccountSuccess(t *testing.T) {
 	var payload struct {
 		Token string `json:"token"`
 	}
-	if err := json.Unmarshal([]byte(emails[0].Payload), &payload); err != nil {
+	if err := json.Unmarshal(emails[0].Payload, &payload); err != nil {
 		t.Fatalf("json.Unmarshal(payload) error = %v", err)
 	}
 

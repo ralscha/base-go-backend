@@ -4,6 +4,7 @@ import (
 	"net/http"
 
 	"base/internal/auth"
+	"base/internal/httpapi/jsonio"
 
 	"github.com/alexedwards/scs/v2"
 )
@@ -20,7 +21,7 @@ func (h AdminHandler) Access(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{
+	jsonio.WriteJSON(w, http.StatusOK, map[string]any{
 		"user":  principal,
 		"roles": principal.Roles,
 	})

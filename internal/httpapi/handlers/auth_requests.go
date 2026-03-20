@@ -19,7 +19,6 @@ const (
 	maxUsernameLength    = 32
 	minPasswordLength    = 12
 	maxPasskeyNameLength = 64
-	totpCodeLength       = 6
 )
 
 type registerRequest struct {
@@ -28,12 +27,12 @@ type registerRequest struct {
 	Password string `json:"password"`
 }
 
-func (r *registerRequest) normalize() {
+func (r *registerRequest) Normalize() {
 	r.Username = strings.ToLower(strings.TrimSpace(r.Username))
 	r.Email = strings.ToLower(strings.TrimSpace(r.Email))
 }
 
-func (r registerRequest) validate() error {
+func (r registerRequest) Validate() error {
 	err := validation.New()
 	validateUsername(err, r.Username)
 	validateEmail(err, r.Email)
@@ -47,12 +46,12 @@ type loginRequest struct {
 	TOTPCode string `json:"totp_code"`
 }
 
-func (r *loginRequest) normalize() {
+func (r *loginRequest) Normalize() {
 	r.Email = strings.ToLower(strings.TrimSpace(r.Email))
 	r.TOTPCode = strings.TrimSpace(r.TOTPCode)
 }
 
-func (r loginRequest) validate() error {
+func (r loginRequest) Validate() error {
 	err := validation.New()
 	validateEmail(err, r.Email)
 	validateRequiredPassword(err, r.Password)
@@ -65,11 +64,11 @@ type passkeyRegistrationRequest struct {
 	Name       string          `json:"name"`
 }
 
-func (r *passkeyRegistrationRequest) normalize() {
+func (r *passkeyRegistrationRequest) Normalize() {
 	r.Name = strings.TrimSpace(r.Name)
 }
 
-func (r passkeyRegistrationRequest) validate() error {
+func (r passkeyRegistrationRequest) Validate() error {
 	err := validation.New()
 	validateCredential(err, r.Credential)
 	if len(r.Name) > maxPasskeyNameLength {
@@ -83,11 +82,11 @@ type passkeyLoginRequest struct {
 	TOTPCode   string          `json:"totp_code"`
 }
 
-func (r *passkeyLoginRequest) normalize() {
+func (r *passkeyLoginRequest) Normalize() {
 	r.TOTPCode = strings.TrimSpace(r.TOTPCode)
 }
 
-func (r passkeyLoginRequest) validate() error {
+func (r passkeyLoginRequest) Validate() error {
 	err := validation.New()
 	validateCredential(err, r.Credential)
 	validateSecondFactor(err, r.TOTPCode)
@@ -98,11 +97,11 @@ type emailRequest struct {
 	Email string `json:"email"`
 }
 
-func (r *emailRequest) normalize() {
+func (r *emailRequest) Normalize() {
 	r.Email = strings.ToLower(strings.TrimSpace(r.Email))
 }
 
-func (r emailRequest) validate() error {
+func (r emailRequest) Validate() error {
 	err := validation.New()
 	validateEmail(err, r.Email)
 	return err.ErrOrNil()
@@ -113,13 +112,15 @@ type tokenPasswordRequest struct {
 	Password string `json:"password"`
 }
 
-func (r *tokenPasswordRequest) normalize() {
+func (r *tokenPasswordRequest) Normalize() {
 	r.Token = strings.TrimSpace(r.Token)
 }
 
-func (r tokenPasswordRequest) validate() error {
+func (r tokenPasswordRequest) Validate() error {
 	err := validation.New()
-	err.NotBlank("token", r.Token)
+	if hasError := err.NotBlank("token", r.Token); hasError {
+		return err.ErrOrNil()
+	}
 	validatePassword(err, r.Password)
 	return err.ErrOrNil()
 }
@@ -128,25 +129,29 @@ type enableTOTPRequest struct {
 	Code string `json:"code"`
 }
 
-func (r *enableTOTPRequest) normalize() {
+func (r *enableTOTPRequest) Normalize() {
 	r.Code = strings.TrimSpace(r.Code)
 }
 
-func (r enableTOTPRequest) validate() error {
+func (r enableTOTPRequest) Validate() error {
 	err := validation.New()
 	validateTOTPCode(err, "code", r.Code)
 	return err.ErrOrNil()
 }
 
 func validateUsername(err *validation.Errors, value string) {
-	err.NotBlank("username", value)
+	if hasError := err.NotBlank("username", value); hasError {
+		return
+	}
 	err.MinRunes("username", value, minUsernameLength)
 	err.MaxRunes("username", value, maxUsernameLength)
 	err.Matches("username", value, reUsernamePattern)
 }
 
 func validateEmail(err *validation.Errors, value string) {
-	err.NotBlank("email", value)
+	if hasError := err.NotBlank("email", value); hasError {
+		return
+	}
 	err.IsEmail("email", value)
 }
 
@@ -155,7 +160,9 @@ func validateRequiredPassword(err *validation.Errors, value string) {
 }
 
 func validatePassword(err *validation.Errors, value string) {
-	err.NotBlank("password", value)
+	if hasError := err.NotBlank("password", value); hasError {
+		return
+	}
 	err.MinRunes("password", strings.TrimSpace(value), minPasswordLength)
 }
 
@@ -173,6 +180,8 @@ func validateSecondFactor(err *validation.Errors, totpCode string) {
 }
 
 func validateTOTPCode(err *validation.Errors, field, value string) {
-	err.NotBlank(field, value)
+	if hasError := err.NotBlank(field, value); hasError {
+		return
+	}
 	err.Matches(field, value, reTOTPCode)
 }

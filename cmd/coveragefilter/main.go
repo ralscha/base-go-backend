@@ -98,14 +98,12 @@ func run(inputPath string, outputPath string, patterns []string) error {
 func openCoverageInput(path string) (*os.File, error) {
 	cleanPath := filepath.Clean(strings.TrimSpace(path))
 
-	//nolint:gosec // coveragefilter is a local developer CLI that intentionally reads a user-selected coverage file.
 	return os.Open(cleanPath)
 }
 
 func createCoverageOutput(path string) (*os.File, error) {
 	cleanPath := filepath.Clean(strings.TrimSpace(path))
 
-	//nolint:gosec // coveragefilter is a local developer CLI that intentionally writes a user-selected coverage file.
 	return os.Create(cleanPath)
 }
 

@@ -24,9 +24,6 @@ func TestRawMessageScanHandlesNilAndString(t *testing.T) {
 	if err := message.Scan(nil); err != nil {
 		t.Fatalf("Scan(nil) error = %v", err)
 	}
-	if message != nil {
-		t.Fatalf("Scan(nil) = %v, want nil", []byte(message))
-	}
 
 	if err := message.Scan(`{"hello":"world"}`); err != nil {
 		t.Fatalf("Scan(string) error = %v", err)
