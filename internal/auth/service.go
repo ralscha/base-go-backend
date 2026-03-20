@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -20,7 +19,6 @@ import (
 	"github.com/pquerna/otp"
 	"github.com/pquerna/otp/totp"
 	ratelimit "github.com/ralscha/ratelimiter-pg"
-	"github.com/sqlc-dev/pqtype"
 )
 
 var (
@@ -760,24 +758,4 @@ func validateTOTPCode(secret, code string) bool {
 		Algorithm: otp.AlgorithmSHA1,
 	})
 	return err == nil && valid
-}
-
-func inetValue(value string) pqtype.Inet {
-	ip := net.ParseIP(strings.TrimSpace(value))
-	if ip == nil {
-		return pqtype.Inet{}
-	}
-	bits := 32
-	if ip.To4() == nil {
-		bits = 128
-	}
-	return pqtype.Inet{IPNet: net.IPNet{IP: ip, Mask: net.CIDRMask(bits, bits)}, Valid: true}
-}
-
-func nullString(value string) sql.NullString {
-	trimmed := strings.TrimSpace(value)
-	if trimmed == "" {
-		return sql.NullString{}
-	}
-	return sql.NullString{String: trimmed, Valid: true}
 }

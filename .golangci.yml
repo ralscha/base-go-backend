@@ -16,6 +16,7 @@ linters:
     - nilerr          # Find code that returns nil instead of error
     - whitespace      # Detect leading/trailing whitespace issues
     - unused          # Find unused constants, variables, functions and types
+    - staticcheck
 output:
   formats:
     text:
