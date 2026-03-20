@@ -287,7 +287,7 @@ func TestRegisterAndLoginFlow(t *testing.T) {
 	}
 	client := &http.Client{Jar: jar}
 
-	registerResp, err := client.Post(server.URL+"/register", "application/json", strings.NewReader(fmt.Sprintf(`{"username":"handler-user","email":"handler-user@example.com","password":"%s"}`, handlerTestValidPassword)))
+	registerResp, err := client.Post(server.URL+"/register", "application/json", strings.NewReader(fmt.Sprintf(`{"username":"  Handler-User ","email":" Handler-User@Example.com ","password":"%s"}`, handlerTestValidPassword)))
 	if err != nil {
 		t.Fatalf("POST /register error = %v", err)
 	}
@@ -321,7 +321,7 @@ func TestRegisterAndLoginFlow(t *testing.T) {
 		t.Fatalf("emails = %+v, want one verify-email message", emails)
 	}
 
-	loginResp, err := client.Post(server.URL+"/login", "application/json", strings.NewReader(fmt.Sprintf(`{"email":"handler-user@example.com","password":"%s"}`, handlerTestValidPassword)))
+	loginResp, err := client.Post(server.URL+"/login", "application/json", strings.NewReader(fmt.Sprintf(`{"email":" Handler-User@Example.com ","password":"%s"}`, handlerTestValidPassword)))
 	if err != nil {
 		t.Fatalf("POST /login error = %v", err)
 	}

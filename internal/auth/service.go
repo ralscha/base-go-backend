@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"strings"
 	"time"
 
 	"base/internal/config"
@@ -115,11 +114,8 @@ func (s *Service) RateLimiter() *ratelimit.RateLimiter {
 }
 
 func (s *Service) Register(ctx context.Context, input RegisterInput) (SessionPrincipal, error) {
-	username := strings.ToLower(strings.TrimSpace(input.Username))
-	email := strings.ToLower(strings.TrimSpace(input.Email))
-	if username == "" || email == "" {
-		return SessionPrincipal{}, errors.New("username and email are required")
-	}
+	username := input.Username
+	email := input.Email
 
 	passwordHash, err := HashPassword(input.Password)
 	if err != nil {
@@ -194,10 +190,7 @@ func (s *Service) Register(ctx context.Context, input RegisterInput) (SessionPri
 }
 
 func (s *Service) LoginWithPassword(ctx context.Context, input LoginInput) (SessionPrincipal, error) {
-	email := strings.ToLower(strings.TrimSpace(input.Email))
-	if email == "" || input.Password == "" {
-		return SessionPrincipal{}, ErrInvalidCredentials
-	}
+	email := input.Email
 
 	if err := s.enforceRateLimit(ctx, email, input.IPAddress); err != nil {
 		return SessionPrincipal{}, err
@@ -356,7 +349,7 @@ func (s *Service) VerifyEmail(ctx context.Context, token string) error {
 }
 
 func (s *Service) RequestPasswordReset(ctx context.Context, email string) error {
-	user, err := s.queries.GetUserByEmail(ctx, strings.ToLower(strings.TrimSpace(email)))
+	user, err := s.queries.GetUserByEmail(ctx, email)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil
@@ -406,7 +399,7 @@ func (s *Service) RequestPasswordReset(ctx context.Context, email string) error 
 }
 
 func (s *Service) RequestAccountRecovery(ctx context.Context, email string) error {
-	user, err := s.queries.GetUserByEmail(ctx, strings.ToLower(strings.TrimSpace(email)))
+	user, err := s.queries.GetUserByEmail(ctx, email)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil
@@ -548,6 +541,19 @@ func (s *Service) CurrentUser(ctx context.Context, userID int64) (SessionPrincip
 	return s.principalWithFactors(ctx, user, roles)
 }
 
+func (s *Service) UserRoleNames(ctx context.Context, userID int64) ([]string, error) {
+	if userID == 0 {
+		return nil, ErrUnauthorized
+	}
+
+	roles, err := s.queries.ListUserRoleNames(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+
+	return roles, nil
+}
+
 func (s *Service) OAuthAuthorizationURL(ctx context.Context, provider string, currentUserID int64) (string, []byte, string, error) {
 	client, normalizedProvider, err := s.oauthProvider(provider)
 	if err != nil {
@@ -590,14 +596,14 @@ func (s *Service) CompleteOAuthAuthentication(ctx context.Context, provider stri
 	if err != nil {
 		return OAuthAuthenticationResult{}, err
 	}
-	if flowState.Provider != normalizedProvider || !subtleCompare(flowState.State, strings.TrimSpace(state)) || strings.TrimSpace(code) == "" {
+	if flowState.Provider != normalizedProvider || !subtleCompare(flowState.State, state) || code == "" {
 		return OAuthAuthenticationResult{}, ErrOAuthState
 	}
 	if flowState.LinkUserID != 0 && flowState.LinkUserID != currentUserID {
 		return OAuthAuthenticationResult{}, ErrOAuthState
 	}
 
-	tokens, err := client.ExchangeCode(ctx, strings.TrimSpace(code), flowState.CodeVerifier)
+	tokens, err := client.ExchangeCode(ctx, code, flowState.CodeVerifier)
 	if err != nil {
 		return OAuthAuthenticationResult{}, fmt.Errorf("exchange oauth code: %w", err)
 	}
@@ -605,7 +611,7 @@ func (s *Service) CompleteOAuthAuthentication(ctx context.Context, provider stri
 	if err != nil {
 		return OAuthAuthenticationResult{}, fmt.Errorf("fetch oauth profile: %w", err)
 	}
-	if strings.TrimSpace(profile.Subject) == "" || strings.TrimSpace(profile.Email) == "" {
+	if profile.Subject == "" || profile.Email == "" {
 		return OAuthAuthenticationResult{}, ErrOAuthProfile
 	}
 
@@ -675,12 +681,11 @@ func (s *Service) handleFailedLogin(ctx context.Context, user sqlc.User) error {
 }
 
 func (s *Service) oauthProvider(name string) (OAuthProviderClient, string, error) {
-	normalizedName := strings.ToLower(strings.TrimSpace(name))
-	provider, ok := s.oauth[normalizedName]
+	provider, ok := s.oauth[name]
 	if !ok {
 		return nil, "", ErrOAuthProvider
 	}
-	return provider, normalizedName, nil
+	return provider, name, nil
 }
 
 func (s *Service) completeUserAuthentication(ctx context.Context, queries *sqlc.Queries, userID int64, updateLastLogin bool) (SessionPrincipal, error) {
@@ -741,7 +746,7 @@ func (s *Service) validateSecondFactor(ctx context.Context, userID int64, code s
 	if err != nil {
 		return err
 	}
-	if strings.TrimSpace(code) == "" {
+	if code == "" {
 		return ErrTOTPRequired
 	}
 	if !validateTOTPCode(secret, code) {
@@ -751,7 +756,7 @@ func (s *Service) validateSecondFactor(ctx context.Context, userID int64, code s
 }
 
 func validateTOTPCode(secret, code string) bool {
-	valid, err := totp.ValidateCustom(strings.TrimSpace(code), secret, time.Now().UTC(), totp.ValidateOpts{
+	valid, err := totp.ValidateCustom(code, secret, time.Now().UTC(), totp.ValidateOpts{
 		Period:    30,
 		Skew:      1,
 		Digits:    otp.DigitsSix,

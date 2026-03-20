@@ -37,15 +37,15 @@ func TestRegisterCreatesUserRoleVerificationTokenAndEmail(t *testing.T) {
 	service := newAuthTestService(db, queries)
 
 	principal, err := service.Register(ctx, RegisterInput{
-		Username: "  NewUser ",
-		Email:    " NewUser@Example.com ",
+		Username: "newuser",
+		Email:    testNewUserEmail,
 		Password: "ValidPassword123",
 	})
 	if err != nil {
 		t.Fatalf("Register() error = %v", err)
 	}
 	if principal.Username != "newuser" || principal.Email != testNewUserEmail {
-		t.Fatalf("principal = %+v, want normalized username/email", principal)
+		t.Fatalf("principal = %+v, want preserved username/email", principal)
 	}
 	if principal.Verified {
 		t.Fatal("expected new registration to be unverified")
@@ -75,7 +75,7 @@ func TestRegisterCreatesUserRoleVerificationTokenAndEmail(t *testing.T) {
 		t.Fatalf("pending emails = %d, want 1", len(emails))
 	}
 	if emails[0].Template != "verify-email" || emails[0].Recipient != testNewUserEmail {
-		t.Fatalf("email = %+v, want verify-email to normalized address", emails[0])
+		t.Fatalf("email = %+v, want verify-email to provided address", emails[0])
 	}
 
 	var payload struct {
@@ -86,7 +86,7 @@ func TestRegisterCreatesUserRoleVerificationTokenAndEmail(t *testing.T) {
 		t.Fatalf("json.Unmarshal(payload) error = %v", err)
 	}
 	if payload.Token == "" || payload.Email != testNewUserEmail {
-		t.Fatalf("payload = %+v, want token and normalized email", payload)
+		t.Fatalf("payload = %+v, want token and provided email", payload)
 	}
 
 	storedToken, err := queries.GetUserToken(ctx, sqlc.GetUserTokenParams{TokenHash: HashToken(payload.Token), Kind: sqlc.TokenKindEmailVerification})
@@ -663,7 +663,7 @@ func TestOAuthAuthorizationURLBuildsSessionAndMode(t *testing.T) {
 	service.cfg.OAuth = config.OAuthConfig{StateTTL: 10 * time.Minute, StateBytes: 12, PKCEVerifierBytes: 18}
 	service.oauth = map[string]OAuthProviderClient{"test": client}
 
-	authorizationURL, sessionJSON, mode, err := service.OAuthAuthorizationURL(ctx, " TEST ", 42)
+	authorizationURL, sessionJSON, mode, err := service.OAuthAuthorizationURL(ctx, "test", 42)
 	if err != nil {
 		t.Fatalf("OAuthAuthorizationURL() error = %v", err)
 	}
@@ -679,7 +679,7 @@ func TestOAuthAuthorizationURLBuildsSessionAndMode(t *testing.T) {
 		t.Fatalf("decodeOAuthFlow() error = %v", err)
 	}
 	if flowState.Provider != "test" || flowState.LinkUserID != 42 || flowState.State == "" || flowState.CodeVerifier == "" {
-		t.Fatalf("flowState = %+v, want normalized provider and generated state", flowState)
+		t.Fatalf("flowState = %+v, want provider and generated state", flowState)
 	}
 	if client.lastAuthorizationState != flowState.State {
 		t.Fatalf("authorization state = %q, want %q", client.lastAuthorizationState, flowState.State)

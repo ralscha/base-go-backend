@@ -467,6 +467,98 @@ func TestPasswordLoginPersistsSessionForAuthenticatedRoutes(t *testing.T) {
 	}
 }
 
+func TestAdminAccessReflectsRoleChangesAfterAuthorizationCacheExpiry(t *testing.T) {
+	ctx := context.Background()
+	env := newIntegrationEnvWithConfig(t, ctx, func(cfg *config.Config) {
+		cfg.Security.AuthorizationCacheTTL = 25 * time.Millisecond
+	})
+
+	user, err := env.queries.CreateUser(ctx, sqlc.CreateUserParams{Username: "admin-cache-user", Email: "admin-cache@example.com"})
+	if err != nil {
+		t.Fatalf("CreateUser() error = %v", err)
+	}
+
+	passwordHash, err := auth.HashPassword("CorrectPassword123")
+	if err != nil {
+		t.Fatalf("HashPassword() error = %v", err)
+	}
+	if _, err := env.queries.SetUserPasswordHash(ctx, sqlc.SetUserPasswordHashParams{ID: user.ID, PasswordHash: sql.NullString{String: passwordHash, Valid: true}}); err != nil {
+		t.Fatalf("SetUserPasswordHash() error = %v", err)
+	}
+	if err := env.queries.MarkUserEmailVerified(ctx, user.ID); err != nil {
+		t.Fatalf("MarkUserEmailVerified() error = %v", err)
+	}
+
+	userRole, err := env.queries.GetRoleByName(ctx, "user")
+	if err != nil {
+		t.Fatalf("GetRoleByName(user) error = %v", err)
+	}
+	if err := env.queries.AddUserRole(ctx, sqlc.AddUserRoleParams{UserID: user.ID, RoleID: userRole.ID}); err != nil {
+		t.Fatalf("AddUserRole(user) error = %v", err)
+	}
+
+	client := newCookieClient(t)
+	loginBody, err := json.Marshal(map[string]string{
+		"email":    user.Email,
+		"password": "CorrectPassword123",
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal(login payload) error = %v", err)
+	}
+
+	loginResp := mustDoRequest(t, client, newRequest(t, ctx, http.MethodPost, env.server.URL+"/api/v1/auth/login", bytes.NewReader(loginBody), withJSONContentType()))
+	defer func() { _ = loginResp.Body.Close() }()
+	if loginResp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(loginResp.Body)
+		t.Fatalf("login status = %d, want %d, body = %s", loginResp.StatusCode, http.StatusOK, strings.TrimSpace(string(body)))
+	}
+
+	adminAccessURL := env.server.URL + "/api/v1/admin/access"
+
+	firstAccessResp := mustDoRequest(t, client, newRequest(t, ctx, http.MethodGet, adminAccessURL, nil))
+	defer func() { _ = firstAccessResp.Body.Close() }()
+	if firstAccessResp.StatusCode != http.StatusForbidden {
+		body, _ := io.ReadAll(firstAccessResp.Body)
+		t.Fatalf("first admin access status = %d, want %d, body = %s", firstAccessResp.StatusCode, http.StatusForbidden, strings.TrimSpace(string(body)))
+	}
+
+	adminRole, err := env.queries.GetRoleByName(ctx, "admin")
+	if err != nil {
+		t.Fatalf("GetRoleByName(admin) error = %v", err)
+	}
+	if err := env.queries.AddUserRole(ctx, sqlc.AddUserRoleParams{UserID: user.ID, RoleID: adminRole.ID}); err != nil {
+		t.Fatalf("AddUserRole(admin) error = %v", err)
+	}
+
+	immediateAccessResp := mustDoRequest(t, client, newRequest(t, ctx, http.MethodGet, adminAccessURL, nil))
+	defer func() { _ = immediateAccessResp.Body.Close() }()
+	if immediateAccessResp.StatusCode != http.StatusForbidden {
+		body, _ := io.ReadAll(immediateAccessResp.Body)
+		t.Fatalf("immediate admin access status = %d, want %d, body = %s", immediateAccessResp.StatusCode, http.StatusForbidden, strings.TrimSpace(string(body)))
+	}
+
+	time.Sleep(50 * time.Millisecond)
+
+	refreshedAccessResp := mustDoRequest(t, client, newRequest(t, ctx, http.MethodGet, adminAccessURL, nil))
+	defer func() { _ = refreshedAccessResp.Body.Close() }()
+	if refreshedAccessResp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(refreshedAccessResp.Body)
+		t.Fatalf("refreshed admin access status = %d, want %d, body = %s", refreshedAccessResp.StatusCode, http.StatusOK, strings.TrimSpace(string(body)))
+	}
+
+	var responseBody struct {
+		Data struct {
+			Roles []string `json:"roles"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(refreshedAccessResp.Body).Decode(&responseBody); err != nil {
+		t.Fatalf("decode refreshed admin access response: %v", err)
+	}
+	if len(responseBody.Data.Roles) != 2 || responseBody.Data.Roles[0] != "admin" || responseBody.Data.Roles[1] != "user" {
+		t.Fatalf("roles = %v, want [admin user]", responseBody.Data.Roles)
+	}
+}
+
 func TestOAuthSignupCreatesUserAndPersistsSession(t *testing.T) {
 	ctx := context.Background()
 	env := newIntegrationEnv(t, ctx)
@@ -864,6 +956,10 @@ type integrationEnv struct {
 }
 
 func newIntegrationEnv(t *testing.T, ctx context.Context) *integrationEnv {
+	return newIntegrationEnvWithConfig(t, ctx, nil)
+}
+
+func newIntegrationEnvWithConfig(t *testing.T, ctx context.Context, configure func(*config.Config)) *integrationEnv {
 	t.Helper()
 
 	oauthProvider := newOAuthTestProvider(t)
@@ -905,13 +1001,14 @@ func newIntegrationEnv(t *testing.T, ctx context.Context) *integrationEnv {
 			Persist:     true,
 		},
 		Security: config.SecurityConfig{
-			EncryptionKey:        "0123456789abcdef0123456789abcdef",
-			PasswordResetTTL:     time.Hour,
-			EmailVerificationTTL: 24 * time.Hour,
-			RecoveryTTL:          30 * time.Minute,
-			FailedLoginThreshold: 5,
-			FailedLoginWindow:    15 * time.Minute,
-			TOTPIssuer:           "base-test",
+			EncryptionKey:         "0123456789abcdef0123456789abcdef",
+			AuthorizationCacheTTL: 5 * time.Second,
+			PasswordResetTTL:      time.Hour,
+			EmailVerificationTTL:  24 * time.Hour,
+			RecoveryTTL:           30 * time.Minute,
+			FailedLoginThreshold:  5,
+			FailedLoginWindow:     15 * time.Minute,
+			TOTPIssuer:            "base-test",
 		},
 		OAuth: config.OAuthConfig{
 			StateTTL:          10 * time.Minute,
@@ -935,6 +1032,9 @@ func newIntegrationEnv(t *testing.T, ctx context.Context) *integrationEnv {
 			RPDisplayName: "Base Test",
 			RPOrigins:     []string{"http://localhost:3000", "http://localhost:8080"},
 		},
+	}
+	if configure != nil {
+		configure(&appCfg)
 	}
 
 	authService, err := auth.NewService(ctx, db, pool, appCfg)

@@ -144,7 +144,7 @@ func (h AuthHandler) BeginPasskeyLogin(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h AuthHandler) StartOAuth(w http.ResponseWriter, r *http.Request) {
-	provider := chi.URLParam(r, "provider")
+	provider := strings.ToLower(strings.TrimSpace(chi.URLParam(r, "provider")))
 	authorizationURL, sessionJSON, mode, err := h.Service.OAuthAuthorizationURL(r.Context(), provider, h.Sessions.GetInt64(r.Context(), "user_id"))
 	if err != nil {
 		handleAuthError(w, err)
@@ -165,7 +165,7 @@ func (h AuthHandler) CompleteOAuth(w http.ResponseWriter, r *http.Request) {
 
 	result, err := h.Service.CompleteOAuthAuthentication(
 		r.Context(),
-		chi.URLParam(r, "provider"),
+		strings.ToLower(strings.TrimSpace(chi.URLParam(r, "provider"))),
 		sessionJSON,
 		strings.TrimSpace(r.URL.Query().Get("state")),
 		strings.TrimSpace(r.URL.Query().Get("code")),
@@ -424,8 +424,6 @@ func (h AuthHandler) completeLogin(ctx context.Context, principal auth.SessionPr
 	}
 
 	h.Sessions.Put(ctx, "user_id", principal.UserID)
-	h.Sessions.Put(ctx, "username", principal.Username)
-	h.Sessions.Put(ctx, "roles", principal.Roles)
 
 	return nil
 }

@@ -23,8 +23,8 @@ type registerRequest struct {
 }
 
 func (r *registerRequest) normalize() {
-	r.Username = strings.TrimSpace(r.Username)
-	r.Email = strings.TrimSpace(r.Email)
+	r.Username = strings.ToLower(strings.TrimSpace(r.Username))
+	r.Email = strings.ToLower(strings.TrimSpace(r.Email))
 }
 
 func (r registerRequest) validate() error {
@@ -42,7 +42,7 @@ type loginRequest struct {
 }
 
 func (r *loginRequest) normalize() {
-	r.Email = strings.TrimSpace(r.Email)
+	r.Email = strings.ToLower(strings.TrimSpace(r.Email))
 	r.TOTPCode = strings.TrimSpace(r.TOTPCode)
 }
 
@@ -93,7 +93,7 @@ type emailRequest struct {
 }
 
 func (r *emailRequest) normalize() {
-	r.Email = strings.TrimSpace(r.Email)
+	r.Email = strings.ToLower(strings.TrimSpace(r.Email))
 }
 
 func (r emailRequest) validate() error {

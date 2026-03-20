@@ -48,6 +48,9 @@ security:
 	if cfg.OAuth.PKCEVerifierBytes != 32 {
 		t.Fatalf("OAuth.PKCEVerifierBytes = %d, want 32", cfg.OAuth.PKCEVerifierBytes)
 	}
+	if cfg.Security.AuthorizationCacheTTL != 5*time.Second {
+		t.Fatalf("Security.AuthorizationCacheTTL = %v, want 5s", cfg.Security.AuthorizationCacheTTL)
+	}
 	if cfg.OAuth.Providers == nil {
 		t.Fatal("OAuth.Providers = nil, want initialized map")
 	}

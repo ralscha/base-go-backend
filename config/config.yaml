@@ -32,6 +32,7 @@ security:
   allowed_origins: []
   csrf_secure: false
   encryption_key: 0123456789abcdef0123456789abcdef
+  authorization_cache_ttl: 5s
   password_reset_ttl: 1h
   email_verification_ttl: 24h
   recovery_ttl: 30m

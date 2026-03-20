@@ -68,7 +68,7 @@ func NewRouter(db *sql.DB, sessions *scs.SessionManager, authService *auth.Servi
 		api.Route("/admin", func(admin chi.Router) {
 			admin.Use(sessions.LoadAndSave)
 			admin.Use(appmw.RequireAuthenticated(sessions))
-			admin.Use(appmw.RequireRoles(sessions, "admin"))
+			admin.Use(appmw.RequireRoles(sessions, authService.UserRoleNames, cfg.Security.AuthorizationCacheTTL, "admin"))
 			admin.Get("/access", adminHandler.Access)
 		})
 	})

@@ -61,6 +61,7 @@ type SecurityConfig struct {
 	AllowedOrigins         []string      `koanf:"allowed_origins"`
 	CSRFSecure             bool          `koanf:"csrf_secure"`
 	EncryptionKey          string        `koanf:"encryption_key"`
+	AuthorizationCacheTTL  time.Duration `koanf:"authorization_cache_ttl"`
 	PasswordResetTTL       time.Duration `koanf:"password_reset_ttl"`
 	EmailVerificationTTL   time.Duration `koanf:"email_verification_ttl"`
 	RecoveryTTL            time.Duration `koanf:"recovery_ttl"`
@@ -148,6 +149,9 @@ func Load() (Config, error) {
 	}
 	if cfg.OAuth.Providers == nil {
 		cfg.OAuth.Providers = map[string]OAuthProviderConfig{}
+	}
+	if cfg.Security.AuthorizationCacheTTL <= 0 {
+		cfg.Security.AuthorizationCacheTTL = 5 * time.Second
 	}
 	for name, provider := range cfg.OAuth.Providers {
 		if !provider.Enabled {
