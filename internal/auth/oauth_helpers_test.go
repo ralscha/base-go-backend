@@ -25,10 +25,12 @@ func TestApplyOAuthProviderDefaults(t *testing.T) {
 }
 
 func TestNewOAuthProviderClientsSkipsDisabledAndNormalizesNames(t *testing.T) {
+	githubProviderKey := " GitHub "
+
 	clients := newOAuthProviderClients(config.OAuthConfig{
 		Providers: map[string]config.OAuthProviderConfig{
 			//nolint:gosec // Test-only OAuth provider fixture uses placeholder values, not real credentials.
-			" GitHub ": {
+			githubProviderKey: {
 				Enabled:      true,
 				ClientID:     strings.Repeat("a", 12),
 				ClientSecret: strings.Repeat("b", 24),

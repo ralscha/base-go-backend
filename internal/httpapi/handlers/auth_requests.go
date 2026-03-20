@@ -140,7 +140,7 @@ func validateRequired(err *validationErrors, field, value string) {
 
 func validateUsername(err *validationErrors, value string) {
 	validateRequired(err, "username", value)
-	if err.has("username", "required") {
+	if err.has("username") {
 		return
 	}
 	if len(value) < minUsernameLength {
@@ -156,7 +156,7 @@ func validateUsername(err *validationErrors, value string) {
 
 func validateEmail(err *validationErrors, value string) {
 	validateRequired(err, "email", value)
-	if err.has("email", "required") {
+	if err.has("email") {
 		return
 	}
 	parsed, parseErr := mail.ParseAddress(value)
@@ -171,7 +171,7 @@ func validateRequiredPassword(err *validationErrors, value string) {
 
 func validatePassword(err *validationErrors, value string) {
 	validateRequired(err, "password", value)
-	if err.has("password", "required") {
+	if err.has("password") {
 		return
 	}
 	actualLength := len(strings.TrimSpace(value))
@@ -195,7 +195,7 @@ func validateSecondFactor(err *validationErrors, totpCode string) {
 
 func validateTOTPCode(err *validationErrors, field, value string) {
 	validateRequired(err, field, value)
-	if err.has(field, "required") {
+	if err.has(field) {
 		return
 	}
 	if len(value) != totpCodeLength {

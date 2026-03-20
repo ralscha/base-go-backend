@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -47,13 +48,13 @@ func run(inputPath string, outputPath string, patterns []string) error {
 		return errors.New("-out is required")
 	}
 
-	inputFile, err := os.Open(inputPath)
+	inputFile, err := openCoverageInput(inputPath)
 	if err != nil {
 		return fmt.Errorf("open input profile: %w", err)
 	}
 	defer func() { _ = inputFile.Close() }()
 
-	outputFile, err := os.Create(outputPath)
+	outputFile, err := createCoverageOutput(outputPath)
 	if err != nil {
 		return fmt.Errorf("create output profile: %w", err)
 	}
@@ -92,6 +93,20 @@ func run(inputPath string, outputPath string, patterns []string) error {
 	}
 
 	return nil
+}
+
+func openCoverageInput(path string) (*os.File, error) {
+	cleanPath := filepath.Clean(strings.TrimSpace(path))
+
+	//nolint:gosec // coveragefilter is a local developer CLI that intentionally reads a user-selected coverage file.
+	return os.Open(cleanPath)
+}
+
+func createCoverageOutput(path string) (*os.File, error) {
+	cleanPath := filepath.Clean(strings.TrimSpace(path))
+
+	//nolint:gosec // coveragefilter is a local developer CLI that intentionally writes a user-selected coverage file.
+	return os.Create(cleanPath)
 }
 
 func shouldExclude(line string, patterns []string) bool {

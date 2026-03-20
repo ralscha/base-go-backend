@@ -7,6 +7,13 @@ import (
 	"net/http"
 )
 
+const (
+	requestValidationFailedMessage = "request validation failed"
+	validationCodeRequired         = "required"
+	validationCodeEmail            = "email"
+	validationFieldEmail           = "email"
+)
+
 type validationFieldErrors map[string]map[string]any
 
 type validationErrors struct {
@@ -19,7 +26,7 @@ func newValidationErrors() *validationErrors {
 
 func (e *validationErrors) Error() string {
 	if len(e.fields) != 1 {
-		return "request validation failed"
+		return requestValidationFailedMessage
 	}
 	for field, fieldErrors := range e.fields {
 		if len(fieldErrors) != 1 {
@@ -29,7 +36,7 @@ func (e *validationErrors) Error() string {
 			return validationMessage(field, code, value)
 		}
 	}
-	return "request validation failed"
+	return requestValidationFailedMessage
 }
 
 func (e *validationErrors) add(field, code string, args ...any) {
@@ -44,12 +51,12 @@ func (e *validationErrors) add(field, code string, args ...any) {
 	fieldErrors[code] = validationValue(code, args...)
 }
 
-func (e *validationErrors) has(field, code string) bool {
+func (e *validationErrors) has(field string) bool {
 	fieldErrors, ok := e.fields[field]
 	if !ok {
 		return false
 	}
-	_, exists := fieldErrors[code]
+	_, exists := fieldErrors[validationCodeRequired]
 	return exists
 }
 
@@ -77,7 +84,7 @@ func (e *validationErrors) fieldMap() validationFieldErrors {
 
 func validationValue(code string, args ...any) any {
 	switch code {
-	case "required", "email":
+	case validationCodeRequired, validationCodeEmail:
 		return true
 	case "minlength", "maxlength":
 		payload := map[string]any{}
@@ -123,9 +130,9 @@ func cloneValidationValue(value any) any {
 
 func validationMessage(field, code string, value any) string {
 	switch code {
-	case "required":
+	case validationCodeRequired:
 		return fmt.Sprintf("%s is required", field)
-	case "email":
+	case validationCodeEmail:
 		return fmt.Sprintf("%s must be a valid email address", field)
 	case "minlength":
 		if payload, ok := value.(map[string]any); ok {
@@ -136,7 +143,7 @@ func validationMessage(field, code string, value any) string {
 			return fmt.Sprintf("%s must be %v characters or fewer", field, payload["requiredLength"])
 		}
 	case "pattern":
-		if field == "email" {
+		if field == validationFieldEmail {
 			return "email must be a valid email address"
 		}
 		return fmt.Sprintf("%s format is invalid", field)
@@ -145,12 +152,11 @@ func validationMessage(field, code string, value any) string {
 			return fmt.Sprintf("provide either %s or %v, not both", field, payload["other"])
 		}
 	}
-	return "request validation failed"
+	return requestValidationFailedMessage
 }
 
 func writeValidationError(w http.ResponseWriter, err error) {
-	var validationErr *validationErrors
-	if errors.As(err, &validationErr) {
+	if validationErr, ok := errors.AsType[*validationErrors](err); ok {
 		writeErrorWithFields(w, http.StatusBadRequest, "validation_failed", validationErr.Error(), validationErr.fieldMap())
 		return
 	}
