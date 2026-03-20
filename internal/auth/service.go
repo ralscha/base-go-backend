@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"base/internal/config"
+	"base/internal/database"
 	"base/internal/store/dbtype"
 	"base/internal/store/sqlc"
 
@@ -127,66 +128,63 @@ func (s *Service) Register(ctx context.Context, input RegisterInput) (SessionPri
 		return SessionPrincipal{}, fmt.Errorf("create verification token: %w", err)
 	}
 
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return SessionPrincipal{}, err
-	}
-	defer func() { _ = tx.Rollback() }()
+	var principal SessionPrincipal
+	if err := s.withTx(ctx, func(q *sqlc.Queries) error {
+		user, err := q.CreateUser(ctx, sqlc.CreateUserParams{Username: username, Email: email})
+		if err != nil {
+			return err
+		}
 
-	q := s.queries.WithTx(tx)
-	user, err := q.CreateUser(ctx, sqlc.CreateUserParams{Username: username, Email: email})
-	if err != nil {
-		return SessionPrincipal{}, err
-	}
+		if _, err := q.SetUserPasswordHash(ctx, sqlc.SetUserPasswordHashParams{ID: user.ID, PasswordHash: sql.NullString{String: passwordHash, Valid: true}}); err != nil {
+			return err
+		}
 
-	if _, err := q.SetUserPasswordHash(ctx, sqlc.SetUserPasswordHashParams{ID: user.ID, PasswordHash: sql.NullString{String: passwordHash, Valid: true}}); err != nil {
-		return SessionPrincipal{}, err
-	}
+		role, err := q.GetRoleByName(ctx, "user")
+		if err != nil {
+			return err
+		}
+		if err := q.AddUserRole(ctx, sqlc.AddUserRoleParams{UserID: user.ID, RoleID: role.ID}); err != nil {
+			return err
+		}
 
-	role, err := q.GetRoleByName(ctx, "user")
-	if err != nil {
-		return SessionPrincipal{}, err
-	}
-	if err := q.AddUserRole(ctx, sqlc.AddUserRoleParams{UserID: user.ID, RoleID: role.ID}); err != nil {
-		return SessionPrincipal{}, err
-	}
+		if _, err := q.CreateUserToken(ctx, sqlc.CreateUserTokenParams{
+			UserID:    user.ID,
+			Kind:      sqlc.TokenKindEmailVerification,
+			TokenHash: tokenHash,
+			ExpiresAt: time.Now().UTC().Add(s.cfg.Security.EmailVerificationTTL),
+		}); err != nil {
+			return err
+		}
 
-	if _, err := q.CreateUserToken(ctx, sqlc.CreateUserTokenParams{
-		UserID:    user.ID,
-		Kind:      sqlc.TokenKindEmailVerification,
-		TokenHash: tokenHash,
-		ExpiresAt: time.Now().UTC().Add(s.cfg.Security.EmailVerificationTTL),
+		payload, err := json.Marshal(map[string]any{
+			"token": plainToken,
+			"email": user.Email,
+		})
+		if err != nil {
+			return err
+		}
+
+		if _, err := q.EnqueueEmail(ctx, sqlc.EnqueueEmailParams{
+			Template:    "verify-email",
+			Recipient:   user.Email,
+			Subject:     "Verify your account",
+			Payload:     dbtype.RawMessage(payload),
+			AvailableAt: time.Now().UTC(),
+		}); err != nil {
+			return err
+		}
+
+		roles, err := q.ListUserRoleNames(ctx, user.ID)
+		if err != nil {
+			return err
+		}
+		principal = principalFromUser(user, roles)
+		return nil
 	}); err != nil {
 		return SessionPrincipal{}, err
 	}
 
-	payload, err := json.Marshal(map[string]any{
-		"token": plainToken,
-		"email": user.Email,
-	})
-	if err != nil {
-		return SessionPrincipal{}, err
-	}
-
-	if _, err := q.EnqueueEmail(ctx, sqlc.EnqueueEmailParams{
-		Template:    "verify-email",
-		Recipient:   user.Email,
-		Subject:     "Verify your account",
-		Payload:     dbtype.RawMessage(payload),
-		AvailableAt: time.Now().UTC(),
-	}); err != nil {
-		return SessionPrincipal{}, err
-	}
-
-	roles, err := q.ListUserRoleNames(ctx, user.ID)
-	if err != nil {
-		return SessionPrincipal{}, err
-	}
-	if err := tx.Commit(); err != nil {
-		return SessionPrincipal{}, err
-	}
-
-	return principalFromUser(user, roles), nil
+	return principal, nil
 }
 
 func (s *Service) LoginWithPassword(ctx context.Context, input LoginInput) (SessionPrincipal, error) {
@@ -289,37 +287,15 @@ func (s *Service) ConfirmTOTPSetup(ctx context.Context, userID int64, code strin
 		return ErrInvalidTOTP
 	}
 
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	q := s.queries.WithTx(tx)
-	if err := q.EnableTotpConfiguration(ctx, userID); err != nil {
-		return err
-	}
-
-	if err := tx.Commit(); err != nil {
-		return err
-	}
-
-	return nil
+	return s.withTx(ctx, func(q *sqlc.Queries) error {
+		return q.EnableTotpConfiguration(ctx, userID)
+	})
 }
 
 func (s *Service) DisableTOTP(ctx context.Context, userID int64) error {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	q := s.queries.WithTx(tx)
-	if err := q.DeleteTotpConfigurationByUserID(ctx, userID); err != nil {
-		return err
-	}
-
-	return tx.Commit()
+	return s.withTx(ctx, func(q *sqlc.Queries) error {
+		return q.DeleteTotpConfigurationByUserID(ctx, userID)
+	})
 }
 
 func (s *Service) VerifyEmail(ctx context.Context, token string) error {
@@ -331,21 +307,12 @@ func (s *Service) VerifyEmail(ctx context.Context, token string) error {
 		return err
 	}
 
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	q := s.queries.WithTx(tx)
-	if err := q.MarkUserEmailVerified(ctx, tokenRow.UserID); err != nil {
-		return err
-	}
-	if err := q.UseUserToken(ctx, tokenRow.ID); err != nil {
-		return err
-	}
-
-	return tx.Commit()
+	return s.withTx(ctx, func(q *sqlc.Queries) error {
+		if err := q.MarkUserEmailVerified(ctx, tokenRow.UserID); err != nil {
+			return err
+		}
+		return q.UseUserToken(ctx, tokenRow.ID)
+	})
 }
 
 func (s *Service) RequestPasswordReset(ctx context.Context, email string) error {
@@ -370,32 +337,24 @@ func (s *Service) RequestPasswordReset(ctx context.Context, email string) error 
 		return err
 	}
 
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
+	return s.withTx(ctx, func(q *sqlc.Queries) error {
+		if _, err := q.CreateUserToken(ctx, sqlc.CreateUserTokenParams{
+			UserID:    user.ID,
+			Kind:      sqlc.TokenKindPasswordReset,
+			TokenHash: tokenHash,
+			ExpiresAt: time.Now().UTC().Add(s.cfg.Security.PasswordResetTTL),
+		}); err != nil {
+			return err
+		}
+		_, err := q.EnqueueEmail(ctx, sqlc.EnqueueEmailParams{
+			Template:    "password-reset",
+			Recipient:   user.Email,
+			Subject:     "Reset your password",
+			Payload:     dbtype.RawMessage(payload),
+			AvailableAt: time.Now().UTC(),
+		})
 		return err
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	q := s.queries.WithTx(tx)
-	if _, err := q.CreateUserToken(ctx, sqlc.CreateUserTokenParams{
-		UserID:    user.ID,
-		Kind:      sqlc.TokenKindPasswordReset,
-		TokenHash: tokenHash,
-		ExpiresAt: time.Now().UTC().Add(s.cfg.Security.PasswordResetTTL),
-	}); err != nil {
-		return err
-	}
-	if _, err := q.EnqueueEmail(ctx, sqlc.EnqueueEmailParams{
-		Template:    "password-reset",
-		Recipient:   user.Email,
-		Subject:     "Reset your password",
-		Payload:     dbtype.RawMessage(payload),
-		AvailableAt: time.Now().UTC(),
-	}); err != nil {
-		return err
-	}
-
-	return tx.Commit()
+	})
 }
 
 func (s *Service) RequestAccountRecovery(ctx context.Context, email string) error {
@@ -420,32 +379,24 @@ func (s *Service) RequestAccountRecovery(ctx context.Context, email string) erro
 		return err
 	}
 
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
+	return s.withTx(ctx, func(q *sqlc.Queries) error {
+		if _, err := q.CreateUserToken(ctx, sqlc.CreateUserTokenParams{
+			UserID:    user.ID,
+			Kind:      sqlc.TokenKindAccountRecovery,
+			TokenHash: tokenHash,
+			ExpiresAt: time.Now().UTC().Add(s.cfg.Security.RecoveryTTL),
+		}); err != nil {
+			return err
+		}
+		_, err := q.EnqueueEmail(ctx, sqlc.EnqueueEmailParams{
+			Template:    "account-recovery",
+			Recipient:   user.Email,
+			Subject:     "Recover your account",
+			Payload:     dbtype.RawMessage(payload),
+			AvailableAt: time.Now().UTC(),
+		})
 		return err
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	q := s.queries.WithTx(tx)
-	if _, err := q.CreateUserToken(ctx, sqlc.CreateUserTokenParams{
-		UserID:    user.ID,
-		Kind:      sqlc.TokenKindAccountRecovery,
-		TokenHash: tokenHash,
-		ExpiresAt: time.Now().UTC().Add(s.cfg.Security.RecoveryTTL),
-	}); err != nil {
-		return err
-	}
-	if _, err := q.EnqueueEmail(ctx, sqlc.EnqueueEmailParams{
-		Template:    "account-recovery",
-		Recipient:   user.Email,
-		Subject:     "Recover your account",
-		Payload:     dbtype.RawMessage(payload),
-		AvailableAt: time.Now().UTC(),
-	}); err != nil {
-		return err
-	}
-
-	return tx.Commit()
+	})
 }
 
 func (s *Service) RecoverAccount(ctx context.Context, token string, password string) error {
@@ -465,27 +416,18 @@ func (s *Service) RecoverAccount(ctx context.Context, token string, password str
 		return err
 	}
 
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	q := s.queries.WithTx(tx)
-	if _, err := q.SetUserPasswordHash(ctx, sqlc.SetUserPasswordHashParams{ID: tokenRow.UserID, PasswordHash: sql.NullString{String: passwordHash, Valid: true}}); err != nil {
-		return err
-	}
-	if err := q.RestoreUserAccess(ctx, tokenRow.UserID); err != nil {
-		return err
-	}
-	if err := q.DeleteTotpConfigurationByUserID(ctx, tokenRow.UserID); err != nil {
-		return err
-	}
-	if err := q.UseUserToken(ctx, tokenRow.ID); err != nil {
-		return err
-	}
-
-	return tx.Commit()
+	return s.withTx(ctx, func(q *sqlc.Queries) error {
+		if _, err := q.SetUserPasswordHash(ctx, sqlc.SetUserPasswordHashParams{ID: tokenRow.UserID, PasswordHash: sql.NullString{String: passwordHash, Valid: true}}); err != nil {
+			return err
+		}
+		if err := q.RestoreUserAccess(ctx, tokenRow.UserID); err != nil {
+			return err
+		}
+		if err := q.DeleteTotpConfigurationByUserID(ctx, tokenRow.UserID); err != nil {
+			return err
+		}
+		return q.UseUserToken(ctx, tokenRow.ID)
+	})
 }
 
 func (s *Service) ResetPassword(ctx context.Context, token string, password string) error {
@@ -505,24 +447,15 @@ func (s *Service) ResetPassword(ctx context.Context, token string, password stri
 		return err
 	}
 
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	q := s.queries.WithTx(tx)
-	if _, err := q.SetUserPasswordHash(ctx, sqlc.SetUserPasswordHashParams{ID: tokenRow.UserID, PasswordHash: sql.NullString{String: passwordHash, Valid: true}}); err != nil {
-		return err
-	}
-	if err := q.UseUserToken(ctx, tokenRow.ID); err != nil {
-		return err
-	}
-	if err := q.LockUserUntil(ctx, sqlc.LockUserUntilParams{ID: tokenRow.UserID}); err != nil {
-		return err
-	}
-
-	return tx.Commit()
+	return s.withTx(ctx, func(q *sqlc.Queries) error {
+		if _, err := q.SetUserPasswordHash(ctx, sqlc.SetUserPasswordHashParams{ID: tokenRow.UserID, PasswordHash: sql.NullString{String: passwordHash, Valid: true}}); err != nil {
+			return err
+		}
+		if err := q.UseUserToken(ctx, tokenRow.ID); err != nil {
+			return err
+		}
+		return q.LockUserUntil(ctx, sqlc.LockUserUntilParams{ID: tokenRow.UserID})
+	})
 }
 
 func (s *Service) CurrentUser(ctx context.Context, userID int64) (SessionPrincipal, error) {
@@ -615,22 +548,19 @@ func (s *Service) CompleteOAuthAuthentication(ctx context.Context, provider stri
 		return OAuthAuthenticationResult{}, ErrOAuthProfile
 	}
 
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return OAuthAuthenticationResult{}, err
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	q := s.queries.WithTx(tx)
-	principal, result, err := s.completeOAuthFlow(ctx, q, normalizedProvider, flowState, profile, tokens)
-	if err != nil {
-		return OAuthAuthenticationResult{}, err
-	}
-	if err := tx.Commit(); err != nil {
+	var result OAuthAuthenticationResult
+	if err := s.withTx(ctx, func(q *sqlc.Queries) error {
+		principal, r, err := s.completeOAuthFlow(ctx, q, normalizedProvider, flowState, profile, tokens)
+		if err != nil {
+			return err
+		}
+		result = r
+		result.Principal = principal
+		return nil
+	}); err != nil {
 		return OAuthAuthenticationResult{}, err
 	}
 
-	result.Principal = principal
 	return result, nil
 }
 
@@ -728,6 +658,12 @@ func (s *Service) principalWithFactors(ctx context.Context, user sqlc.User, role
 		return SessionPrincipal{}, err
 	}
 	return principal, nil
+}
+
+func (s *Service) withTx(ctx context.Context, fn func(*sqlc.Queries) error) error {
+	return database.WithTx(ctx, s.db, func(tx *sql.Tx) error {
+		return fn(s.queries.WithTx(tx))
+	})
 }
 
 func (s *Service) validateSecondFactor(ctx context.Context, userID int64, code string) error {

@@ -5,68 +5,14 @@ import (
 	"encoding/json"
 	"net/http"
 	"slices"
-	"sync"
 	"time"
+
+	internalcache "base/internal/cache"
 
 	"github.com/alexedwards/scs/v2"
 )
 
 type RoleResolver func(ctx context.Context, userID int64) ([]string, error)
-
-type roleCacheEntry struct {
-	roles     []string
-	expiresAt time.Time
-}
-
-type roleCache struct {
-	ttl   time.Duration
-	mu    sync.RWMutex
-	items map[int64]roleCacheEntry
-}
-
-func newRoleCache(ttl time.Duration) *roleCache {
-	if ttl <= 0 {
-		return nil
-	}
-
-	return &roleCache{
-		ttl:   ttl,
-		items: make(map[int64]roleCacheEntry),
-	}
-}
-
-func (c *roleCache) get(userID int64, now time.Time) ([]string, bool) {
-	if c == nil {
-		return nil, false
-	}
-
-	c.mu.RLock()
-	entry, ok := c.items[userID]
-	c.mu.RUnlock()
-	if !ok || now.After(entry.expiresAt) {
-		if ok {
-			c.mu.Lock()
-			delete(c.items, userID)
-			c.mu.Unlock()
-		}
-		return nil, false
-	}
-
-	return append([]string(nil), entry.roles...), true
-}
-
-func (c *roleCache) set(userID int64, roles []string, now time.Time) {
-	if c == nil {
-		return
-	}
-
-	c.mu.Lock()
-	c.items[userID] = roleCacheEntry{
-		roles:     append([]string(nil), roles...),
-		expiresAt: now.Add(c.ttl),
-	}
-	c.mu.Unlock()
-}
 
 type apiError struct {
 	Error struct {
@@ -87,8 +33,7 @@ func RequireAuthenticated(sessions *scs.SessionManager) func(http.Handler) http.
 	}
 }
 
-func RequireRoles(sessions *scs.SessionManager, resolveRoles RoleResolver, cacheTTL time.Duration, required ...string) func(http.Handler) http.Handler {
-	cache := newRoleCache(cacheTTL)
+func RequireRoles(sessions *scs.SessionManager, resolveRoles RoleResolver, roleCache *internalcache.Cache[int64, []string], required ...string) func(http.Handler) http.Handler {
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -98,7 +43,7 @@ func RequireRoles(sessions *scs.SessionManager, resolveRoles RoleResolver, cache
 				return
 			}
 
-			roles, err := resolveRoleNames(r.Context(), userID, resolveRoles, cache)
+			roles, err := resolveRoleNames(r.Context(), userID, resolveRoles, roleCache)
 			if err != nil {
 				writeAuthzError(w, http.StatusInternalServerError, "internal_error", "an unexpected error occurred")
 				return
@@ -120,9 +65,9 @@ func RequireRoles(sessions *scs.SessionManager, resolveRoles RoleResolver, cache
 	}
 }
 
-func resolveRoleNames(ctx context.Context, userID int64, resolveRoles RoleResolver, cache *roleCache) ([]string, error) {
+func resolveRoleNames(ctx context.Context, userID int64, resolveRoles RoleResolver, roleCache *internalcache.Cache[int64, []string]) ([]string, error) {
 	now := time.Now().UTC()
-	if roles, ok := cache.get(userID, now); ok {
+	if roles, ok := roleCache.Get(userID, now); ok {
 		return roles, nil
 	}
 
@@ -131,8 +76,12 @@ func resolveRoleNames(ctx context.Context, userID int64, resolveRoles RoleResolv
 		return nil, err
 	}
 
-	cache.set(userID, roles, now)
+	roleCache.Set(userID, roles, now)
 	return append([]string(nil), roles...), nil
+}
+
+func cloneStringSlice(values []string) []string {
+	return append([]string(nil), values...)
 }
 
 func contains(items []string, wanted string) bool {

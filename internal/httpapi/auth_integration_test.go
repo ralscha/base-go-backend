@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"base/internal/auth"
+	"base/internal/cache"
 	"base/internal/config"
 	"base/internal/database"
 	"base/internal/httpapi"
@@ -1059,7 +1060,10 @@ func newIntegrationEnvWithConfig(t *testing.T, ctx context.Context, configure fu
 		t.Fatalf("loginLimiter.Init() error = %v", err)
 	}
 
-	handler := httpapi.NewRouter(db, sessions, authService, loginLimiter, appCfg)
+	roleCache := cache.New[int64](appCfg.Security.AuthorizationCacheTTL, func(v []string) []string {
+		return append([]string(nil), v...)
+	})
+	handler := httpapi.NewRouter(db, sessions, authService, loginLimiter, roleCache, appCfg)
 	server := httptest.NewServer(handler)
 	t.Cleanup(server.Close)
 

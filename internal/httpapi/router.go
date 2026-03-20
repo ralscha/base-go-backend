@@ -5,6 +5,7 @@ import (
 	"net/http"
 
 	"base/internal/auth"
+	"base/internal/cache"
 	"base/internal/config"
 	"base/internal/httpapi/handlers"
 	appmw "base/internal/httpapi/middleware"
@@ -15,7 +16,7 @@ import (
 	ratelimit "github.com/ralscha/ratelimiter-pg"
 )
 
-func NewRouter(db *sql.DB, sessions *scs.SessionManager, authService *auth.Service, loginLimiter *ratelimit.RateLimiter, cfg config.Config) http.Handler {
+func NewRouter(db *sql.DB, sessions *scs.SessionManager, authService *auth.Service, loginLimiter *ratelimit.RateLimiter, roleCache *cache.Cache[int64, []string], cfg config.Config) http.Handler {
 	r := chi.NewRouter()
 	r.Use(chimw.RealIP)
 	if cfg.App.Env != "production" {
@@ -68,7 +69,7 @@ func NewRouter(db *sql.DB, sessions *scs.SessionManager, authService *auth.Servi
 		api.Route("/admin", func(admin chi.Router) {
 			admin.Use(sessions.LoadAndSave)
 			admin.Use(appmw.RequireAuthenticated(sessions))
-			admin.Use(appmw.RequireRoles(sessions, authService.UserRoleNames, cfg.Security.AuthorizationCacheTTL, "admin"))
+			admin.Use(appmw.RequireRoles(sessions, authService.UserRoleNames, roleCache, "admin"))
 			admin.Get("/access", adminHandler.Access)
 		})
 	})

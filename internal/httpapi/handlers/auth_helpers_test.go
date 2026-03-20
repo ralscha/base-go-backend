@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"base/internal/auth"
+	"base/internal/validation"
 )
 
 func TestDecodeJSONRejectsInvalidBody(t *testing.T) {
@@ -57,8 +58,8 @@ func TestDecodeJSONParsesValidBody(t *testing.T) {
 
 func TestWriteValidationError(t *testing.T) {
 	recorder := httptest.NewRecorder()
-	validationErr := newValidationErrors()
-	validationErr.add("email", "required")
+	validationErr := validation.New()
+	validationErr.Add("email", "required")
 
 	writeValidationError(recorder, validationErr)
 
@@ -76,7 +77,7 @@ func TestWriteValidationError(t *testing.T) {
 	if response.Error.Code != "validation_failed" || response.Error.Message != "email is required" {
 		t.Fatalf("response.Error = %+v, want code=%q message=%q", response.Error, "validation_failed", "email is required")
 	}
-	wantFields := validationFieldErrors{"email": map[string]any{"required": true}}
+	wantFields := validation.FieldErrors{"email": map[string]any{"required": true}}
 	if !reflect.DeepEqual(response.Error.Fields, wantFields) {
 		t.Fatalf("response.Error.Fields = %+v, want %+v", response.Error.Fields, wantFields)
 	}
@@ -87,22 +88,22 @@ func TestValidationHelpers(t *testing.T) {
 		name     string
 		validate func() error
 		wantErr  string
-		wantMap  validationFieldErrors
+		wantMap  validation.FieldErrors
 	}{
-		{name: "register missing username", validate: func() error { return registerRequest{Email: "user@example.com", Password: "Password12345"}.validate() }, wantErr: "username is required", wantMap: validationFieldErrors{"username": map[string]any{"required": true}}},
+		{name: "register missing username", validate: func() error { return registerRequest{Email: "user@example.com", Password: "Password12345"}.validate() }, wantErr: "username is required", wantMap: validation.FieldErrors{"username": map[string]any{"required": true}}},
 		{name: "register invalid username and password", validate: func() error {
 			return registerRequest{Username: "ab", Email: "user@example.com", Password: "short"}.validate()
-		}, wantErr: "request validation failed", wantMap: validationFieldErrors{"username": map[string]any{"minlength": map[string]any{"requiredLength": minUsernameLength, "actualLength": 2}}, "password": map[string]any{"minlength": map[string]any{"requiredLength": minPasswordLength, "actualLength": 5}}}},
+		}, wantErr: "request validation failed", wantMap: validation.FieldErrors{"username": map[string]any{"minlength": map[string]any{"requiredLength": minUsernameLength, "actualLength": 2}}, "password": map[string]any{"minlength": map[string]any{"requiredLength": minPasswordLength, "actualLength": 5}}}},
 		{name: "register invalid email", validate: func() error {
 			return registerRequest{Username: "user", Email: "invalid", Password: "Password12345"}.validate()
-		}, wantErr: "email must be a valid email address", wantMap: validationFieldErrors{"email": map[string]any{"email": true}}},
+		}, wantErr: "email must be a valid email address", wantMap: validation.FieldErrors{"email": map[string]any{"email": true}}},
 		{name: "login invalid totp", validate: func() error {
 			return loginRequest{Email: "user@example.com", Password: "Password12345", TOTPCode: "12ab"}.validate()
-		}, wantErr: "totp_code format is invalid", wantMap: validationFieldErrors{"totp_code": map[string]any{"pattern": map[string]any{"requiredPattern": `^[0-9]{6}$`}}}},
-		{name: "email only invalid", validate: func() error { return emailRequest{Email: "not-an-email"}.validate() }, wantErr: "email must be a valid email address", wantMap: validationFieldErrors{"email": map[string]any{"email": true}}},
-		{name: "token password missing token", validate: func() error { return tokenPasswordRequest{Password: "Password12345"}.validate() }, wantErr: "token is required", wantMap: validationFieldErrors{"token": map[string]any{"required": true}}},
-		{name: "totp setup missing code", validate: func() error { return enableTOTPRequest{Code: " "}.validate() }, wantErr: "code is required", wantMap: validationFieldErrors{"code": map[string]any{"required": true}}},
-		{name: "passkey missing credential", validate: func() error { return passkeyRegistrationRequest{}.validate() }, wantErr: "credential is required", wantMap: validationFieldErrors{"credential": map[string]any{"required": true}}},
+		}, wantErr: "totp_code format is invalid", wantMap: validation.FieldErrors{"totp_code": map[string]any{"pattern": map[string]any{"requiredPattern": `^[0-9]{6}$`}}}},
+		{name: "email only invalid", validate: func() error { return emailRequest{Email: "not-an-email"}.validate() }, wantErr: "email must be a valid email address", wantMap: validation.FieldErrors{"email": map[string]any{"email": true}}},
+		{name: "token password missing token", validate: func() error { return tokenPasswordRequest{Password: "Password12345"}.validate() }, wantErr: "token is required", wantMap: validation.FieldErrors{"token": map[string]any{"required": true}}},
+		{name: "totp setup missing code", validate: func() error { return enableTOTPRequest{Code: " "}.validate() }, wantErr: "code is required", wantMap: validation.FieldErrors{"code": map[string]any{"required": true}}},
+		{name: "passkey missing credential", validate: func() error { return passkeyRegistrationRequest{}.validate() }, wantErr: "credential is required", wantMap: validation.FieldErrors{"credential": map[string]any{"required": true}}},
 	}
 
 	for _, testCase := range testCases {
@@ -111,15 +112,15 @@ func TestValidationHelpers(t *testing.T) {
 			if err == nil {
 				t.Fatal("validation error = nil, want non-nil")
 			}
-			var validationErr *validationErrors
+			var validationErr *validation.Errors
 			if !errors.As(err, &validationErr) {
-				t.Fatalf("validation error type = %T, want *validationErrors", err)
+				t.Fatalf("validation error type = %T, want *validation.Errors", err)
 			}
 			if validationErr.Error() != testCase.wantErr {
 				t.Fatalf("validation error = %q, want %q", validationErr.Error(), testCase.wantErr)
 			}
-			if !reflect.DeepEqual(validationErr.fieldMap(), testCase.wantMap) {
-				t.Fatalf("validation fields = %+v, want %+v", validationErr.fieldMap(), testCase.wantMap)
+			if !reflect.DeepEqual(validationErr.FieldMap(), testCase.wantMap) {
+				t.Fatalf("validation fields = %+v, want %+v", validationErr.FieldMap(), testCase.wantMap)
 			}
 		})
 	}
@@ -320,15 +321,15 @@ func TestHandlerMethodsRejectInvalidPayloads(t *testing.T) {
 		handler     func(AuthHandler, http.ResponseWriter, *http.Request)
 		body        string
 		wantMessage string
-		wantFields  validationFieldErrors
+		wantFields  validation.FieldErrors
 	}{
-		{name: "register multiple invalid fields", handler: AuthHandler.Register, body: `{"username":"ab","email":"invalid","password":"short"}`, wantMessage: "request validation failed", wantFields: validationFieldErrors{"username": map[string]any{"minlength": map[string]any{"requiredLength": float64(minUsernameLength), "actualLength": float64(2)}}, "email": map[string]any{"email": true}, "password": map[string]any{"minlength": map[string]any{"requiredLength": float64(minPasswordLength), "actualLength": float64(5)}}}},
-		{name: "request password reset invalid email", handler: AuthHandler.RequestPasswordReset, body: `{"email":"invalid"}`, wantMessage: "email must be a valid email address", wantFields: validationFieldErrors{"email": map[string]any{"email": true}}},
-		{name: "request account recovery missing email", handler: AuthHandler.RequestAccountRecovery, body: `{"email":""}`, wantMessage: "email is required", wantFields: validationFieldErrors{"email": map[string]any{"required": true}}},
-		{name: "reset password short password", handler: AuthHandler.ResetPassword, body: `{"token":"abc","password":"short"}`, wantMessage: "password must be at least 12 characters", wantFields: validationFieldErrors{"password": map[string]any{"minlength": map[string]any{"requiredLength": float64(minPasswordLength), "actualLength": float64(5)}}}},
-		{name: "recover account missing password", handler: AuthHandler.RecoverAccount, body: `{"token":"abc"}`, wantMessage: "password is required", wantFields: validationFieldErrors{"password": map[string]any{"required": true}}},
-		{name: "enable totp invalid code", handler: AuthHandler.EnableTOTP, body: `{"code":"12ab"}`, wantMessage: "code format is invalid", wantFields: validationFieldErrors{"code": map[string]any{"pattern": map[string]any{"requiredPattern": `^[0-9]{6}$`}}}},
-		{name: "finish passkey registration missing credential", handler: AuthHandler.FinishPasskeyRegistration, body: `{"name":"Laptop key"}`, wantMessage: "credential is required", wantFields: validationFieldErrors{"credential": map[string]any{"required": true}}},
+		{name: "register multiple invalid fields", handler: AuthHandler.Register, body: `{"username":"ab","email":"invalid","password":"short"}`, wantMessage: "request validation failed", wantFields: validation.FieldErrors{"username": map[string]any{"minlength": map[string]any{"requiredLength": float64(minUsernameLength), "actualLength": float64(2)}}, "email": map[string]any{"email": true}, "password": map[string]any{"minlength": map[string]any{"requiredLength": float64(minPasswordLength), "actualLength": float64(5)}}}},
+		{name: "request password reset invalid email", handler: AuthHandler.RequestPasswordReset, body: `{"email":"invalid"}`, wantMessage: "email must be a valid email address", wantFields: validation.FieldErrors{"email": map[string]any{"email": true}}},
+		{name: "request account recovery missing email", handler: AuthHandler.RequestAccountRecovery, body: `{"email":""}`, wantMessage: "email is required", wantFields: validation.FieldErrors{"email": map[string]any{"required": true}}},
+		{name: "reset password short password", handler: AuthHandler.ResetPassword, body: `{"token":"abc","password":"short"}`, wantMessage: "password must be at least 12 characters", wantFields: validation.FieldErrors{"password": map[string]any{"minlength": map[string]any{"requiredLength": float64(minPasswordLength), "actualLength": float64(5)}}}},
+		{name: "recover account missing password", handler: AuthHandler.RecoverAccount, body: `{"token":"abc"}`, wantMessage: "password is required", wantFields: validation.FieldErrors{"password": map[string]any{"required": true}}},
+		{name: "enable totp invalid code", handler: AuthHandler.EnableTOTP, body: `{"code":"12ab"}`, wantMessage: "code format is invalid", wantFields: validation.FieldErrors{"code": map[string]any{"pattern": map[string]any{"requiredPattern": `^[0-9]{6}$`}}}},
+		{name: "finish passkey registration missing credential", handler: AuthHandler.FinishPasskeyRegistration, body: `{"name":"Laptop key"}`, wantMessage: "credential is required", wantFields: validation.FieldErrors{"credential": map[string]any{"required": true}}},
 	}
 
 	for _, testCase := range testCases {

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"base/internal/auth"
+	"base/internal/cache"
 	"base/internal/config"
 	"base/internal/database"
 	"base/internal/httpapi"
@@ -65,6 +66,11 @@ func New(ctx context.Context, cfg config.Config) (*App, error) {
 	mailService := mailer.New(logger, cfg.Mailer)
 	jobScheduler := scheduler.Start(ctx, logger, db, mailService, authService, cfg)
 
+	roleCache := cache.New[int64](cfg.Security.AuthorizationCacheTTL, func(v []string) []string {
+		return append([]string(nil), v...)
+	})
+	jobScheduler.RegisterSweeper(roleCache.Sweep)
+
 	loginLimiter := ratelimit.New(pgxPool, "public", ratelimit.BucketConfig{
 		Capacity:        10,
 		RefillPerSecond: 1.0 / 30.0, // 2 tokens/min → 120 attempts/hr sustained
@@ -77,7 +83,7 @@ func New(ctx context.Context, cfg config.Config) (*App, error) {
 		return nil, fmt.Errorf("init login rate limiter: %w", err)
 	}
 
-	handler := httpapi.NewRouter(db, sessions, authService, loginLimiter, cfg)
+	handler := httpapi.NewRouter(db, sessions, authService, loginLimiter, roleCache, cfg)
 	server := &http.Server{
 		Addr:              cfg.HTTP.Address,
 		Handler:           handler,

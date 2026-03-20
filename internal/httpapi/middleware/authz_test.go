@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	internalcache "base/internal/cache"
+
 	"github.com/alexedwards/scs/v2"
 )
 
@@ -70,7 +72,7 @@ func TestRequireRolesAllowsAdminOverride(t *testing.T) {
 			t.Fatalf("userID = %d, want 42", userID)
 		}
 		return []string{"admin"}, nil
-	}, time.Minute, "reports:read")(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	}, internalcache.New[int64, []string](time.Minute, nil), "reports:read")(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		nextCalled = true
 		w.WriteHeader(http.StatusNoContent)
 	}))
@@ -100,7 +102,7 @@ func TestRequireRolesRejectsMissingRole(t *testing.T) {
 			t.Fatalf("userID = %d, want 42", userID)
 		}
 		return []string{"viewer"}, nil
-	}, time.Minute, "reports:read")(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	}, internalcache.New[int64, []string](time.Minute, nil), "reports:read")(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Fatal("next handler should not be called")
 	}))
 	handler := sessions.LoadAndSave(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -133,7 +135,7 @@ func TestRequireRolesCachesResolverResults(t *testing.T) {
 		defer mu.Unlock()
 		resolverCalls++
 		return []string{"reports:read"}, nil
-	}, time.Minute, "reports:read")(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	}, internalcache.New[int64, []string](time.Minute, nil), "reports:read")(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	handler := sessions.LoadAndSave(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -166,7 +168,7 @@ func TestRequireRolesRefreshesAfterCacheExpiry(t *testing.T) {
 		defer mu.Unlock()
 		resolverCalls++
 		return append([]string(nil), currentRoles...), nil
-	}, 10*time.Millisecond, "reports:read")(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	}, internalcache.New[int64, []string](10*time.Millisecond, nil), "reports:read")(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	handler := sessions.LoadAndSave(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

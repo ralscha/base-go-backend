@@ -11,6 +11,20 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
+func WithTx(ctx context.Context, db *sql.DB, fn func(*sql.Tx) error) error {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if err := fn(tx); err != nil {
+		return err
+	}
+
+	return tx.Commit()
+}
+
 func Open(ctx context.Context, cfg config.DatabaseConfig) (*sql.DB, error) {
 	db, err := sql.Open("pgx", cfg.URL)
 	if err != nil {

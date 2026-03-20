@@ -14,11 +14,12 @@ import (
 )
 
 type Scheduler struct {
-	logger *slog.Logger
-	mail   *mailer.Mailer
-	q      *sqlc.Queries
-	auth   *auth.Service
-	cfg    config.Config
+	logger   *slog.Logger
+	mail     *mailer.Mailer
+	q        *sqlc.Queries
+	auth     *auth.Service
+	cfg      config.Config
+	sweepers []func(time.Time)
 
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
@@ -52,6 +53,15 @@ func (s *Scheduler) Stop() {
 	}
 	s.cancel()
 	s.wg.Wait()
+}
+
+// RegisterSweeper registers a function that is called during each cleanup run
+// to evict expired entries from an in-process cache.
+func (s *Scheduler) RegisterSweeper(fn func(time.Time)) {
+	if s == nil {
+		return
+	}
+	s.sweepers = append(s.sweepers, fn)
 }
 
 func (s *Scheduler) loop(ctx context.Context, interval time.Duration, job func(context.Context)) {
@@ -127,6 +137,11 @@ func (s *Scheduler) cleanup(ctx context.Context) {
 		} else if removed > 0 {
 			s.logger.Info("deleted stale rate limit buckets", slog.Int64("count", removed))
 		}
+	}
+
+	now := time.Now().UTC()
+	for _, sweep := range s.sweepers {
+		sweep(now)
 	}
 }
 
