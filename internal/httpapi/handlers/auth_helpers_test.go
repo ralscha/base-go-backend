@@ -35,6 +35,7 @@ func TestValidationHelpers(t *testing.T) {
 		{name: "token password missing token", validate: func() error { return tokenPasswordRequest{Password: "Password12345"}.Validate() }, wantErr: "token is required", wantMap: validation.FieldErrors{"token": map[string]any{"required": true}}},
 		{name: "totp setup missing code", validate: func() error { return enableTOTPRequest{Code: " "}.Validate() }, wantErr: "code is required", wantMap: validation.FieldErrors{"code": map[string]any{"required": true}}},
 		{name: "passkey missing credential", validate: func() error { return passkeyRegistrationRequest{}.Validate() }, wantErr: "credential is required", wantMap: validation.FieldErrors{"credential": map[string]any{"required": true}}},
+		{name: "passkey login missing credential", validate: func() error { return passkeyLoginRequest{}.Validate() }, wantErr: "credential is required", wantMap: validation.FieldErrors{"credential": map[string]any{"required": true}}},
 	}
 
 	for _, testCase := range testCases {
@@ -296,5 +297,8 @@ func TestRequireJSONValueAcceptsStructuredJSON(t *testing.T) {
 
 	if err := (passkeyRegistrationRequest{Credential: credential}).Validate(); err != nil {
 		t.Fatalf("passkeyRegistrationRequest.Validate() error = %v, want nil", err)
+	}
+	if err := (passkeyLoginRequest{Credential: credential}).Validate(); err != nil {
+		t.Fatalf("passkeyLoginRequest.Validate() error = %v, want nil", err)
 	}
 }

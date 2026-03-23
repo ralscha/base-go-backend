@@ -33,3 +33,14 @@ SET attempts = attempts + 1,
     last_error = $2,
     available_at = NOW() + ($3 * INTERVAL '1 second')
 WHERE id = $1;
+
+-- name: DeleteSentEmailsBefore :execrows
+DELETE FROM email_outbox
+WHERE sent_at IS NOT NULL
+  AND sent_at < $1;
+
+-- name: DeleteFailedEmailsBefore :execrows
+DELETE FROM email_outbox
+WHERE sent_at IS NULL
+  AND last_error IS NOT NULL
+  AND available_at < $1;

@@ -101,11 +101,85 @@ func TestCleanupRemovesExpiredAndUsedTokens(t *testing.T) {
 		t.Fatalf("CreateUserToken(active) error = %v", err)
 	}
 
-	scheduler := &Scheduler{logger: discardLogger(), q: queries}
+	oldSentEmail, err := queries.EnqueueEmail(ctx, sqlc.EnqueueEmailParams{
+		Template:    "welcome",
+		Recipient:   "old-sent@example.com",
+		Subject:     "Old Sent",
+		Payload:     []byte(`{"name":"old sent"}`),
+		AvailableAt: time.Now().UTC().Add(-48 * time.Hour),
+	})
+	if err != nil {
+		t.Fatalf("EnqueueEmail(old sent) error = %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE email_outbox SET sent_at = $2, updated_at = $2 WHERE id = $1`, oldSentEmail.ID, time.Now().UTC().Add(-48*time.Hour)); err != nil {
+		t.Fatalf("age old sent email: %v", err)
+	}
+
+	oldFailedEmail, err := queries.EnqueueEmail(ctx, sqlc.EnqueueEmailParams{
+		Template:    "welcome",
+		Recipient:   "old-failed@example.com",
+		Subject:     "Old Failed",
+		Payload:     []byte(`{"name":"old failed"}`),
+		AvailableAt: time.Now().UTC().Add(-48 * time.Hour),
+	})
+	if err != nil {
+		t.Fatalf("EnqueueEmail(old failed) error = %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE email_outbox SET attempts = 2, last_error = 'smtp timeout', available_at = $2 WHERE id = $1`, oldFailedEmail.ID, time.Now().UTC().Add(-48*time.Hour)); err != nil {
+		t.Fatalf("age old failed email: %v", err)
+	}
+
+	recentSentEmail, err := queries.EnqueueEmail(ctx, sqlc.EnqueueEmailParams{
+		Template:    "welcome",
+		Recipient:   "recent-sent@example.com",
+		Subject:     "Recent Sent",
+		Payload:     []byte(`{"name":"recent sent"}`),
+		AvailableAt: time.Now().UTC().Add(-time.Hour),
+	})
+	if err != nil {
+		t.Fatalf("EnqueueEmail(recent sent) error = %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE email_outbox SET sent_at = $2, updated_at = $2 WHERE id = $1`, recentSentEmail.ID, time.Now().UTC().Add(-6*time.Hour)); err != nil {
+		t.Fatalf("set recent sent email: %v", err)
+	}
+
+	recentFailedEmail, err := queries.EnqueueEmail(ctx, sqlc.EnqueueEmailParams{
+		Template:    "welcome",
+		Recipient:   "recent-failed@example.com",
+		Subject:     "Recent Failed",
+		Payload:     []byte(`{"name":"recent failed"}`),
+		AvailableAt: time.Now().UTC().Add(-time.Hour),
+	})
+	if err != nil {
+		t.Fatalf("EnqueueEmail(recent failed) error = %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE email_outbox SET attempts = 1, last_error = 'smtp timeout', available_at = $2 WHERE id = $1`, recentFailedEmail.ID, time.Now().UTC().Add(-6*time.Hour)); err != nil {
+		t.Fatalf("set recent failed email: %v", err)
+	}
+
+	scheduler := &Scheduler{logger: discardLogger(), q: queries, cfg: config.Config{Scheduler: config.SchedulerConfig{EmailOutboxRetention: 24 * time.Hour}}}
 	scheduler.cleanup(ctx)
 
 	assertCount(t, ctx, db, `SELECT COUNT(*) FROM user_tokens`)
 	assertCount(t, ctx, db, `SELECT COUNT(*) FROM user_tokens WHERE token_hash = 'active-token'`)
+	assertCount(t, ctx, db, `SELECT COUNT(*) FROM email_outbox WHERE id = $1`, recentSentEmail.ID)
+	assertCount(t, ctx, db, `SELECT COUNT(*) FROM email_outbox WHERE id = $1`, recentFailedEmail.ID)
+
+	var oldSentCount int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM email_outbox WHERE id = $1`, oldSentEmail.ID).Scan(&oldSentCount); err != nil {
+		t.Fatalf("count old sent email error = %v", err)
+	}
+	if oldSentCount != 0 {
+		t.Fatalf("old sent email count = %d, want 0", oldSentCount)
+	}
+
+	var oldFailedCount int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM email_outbox WHERE id = $1`, oldFailedEmail.ID).Scan(&oldFailedCount); err != nil {
+		t.Fatalf("count old failed email error = %v", err)
+	}
+	if oldFailedCount != 0 {
+		t.Fatalf("old failed email count = %d, want 0", oldFailedCount)
+	}
 }
 
 func TestDisableInactiveUsersDisablesOnlyStaleAccounts(t *testing.T) {

@@ -184,7 +184,7 @@ func (h AuthHandler) FinishPasskeyLogin(w http.ResponseWriter, r *http.Request) 
 	}
 
 	sessionJSON := []byte(h.Sessions.GetString(r.Context(), passkeyLoginSessionKey))
-	principal, err := h.Service.FinishPasskeyLogin(r.Context(), sessionJSON, req.Credential, req.TOTPCode)
+	principal, err := h.Service.FinishPasskeyLogin(r.Context(), sessionJSON, req.Credential)
 	if err != nil {
 		handleAuthError(w, err)
 		return

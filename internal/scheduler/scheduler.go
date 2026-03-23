@@ -123,6 +123,21 @@ func (s *Scheduler) cleanup(ctx context.Context) {
 		s.logger.Info("deleted expired user tokens", slog.Int64("count", deletedExpiredTokens))
 	}
 
+	emailOutboxCutoff := time.Now().UTC().Add(-s.cfg.Scheduler.EmailOutboxRetention)
+	deletedSentEmails, err := s.q.DeleteSentEmailsBefore(ctx, sql.NullTime{Time: emailOutboxCutoff, Valid: true})
+	if err != nil {
+		s.logger.Error("delete sent emails from outbox", slog.Any("err", err))
+	} else if deletedSentEmails > 0 {
+		s.logger.Info("deleted sent emails from outbox", slog.Int64("count", deletedSentEmails))
+	}
+
+	deletedFailedEmails, err := s.q.DeleteFailedEmailsBefore(ctx, emailOutboxCutoff)
+	if err != nil {
+		s.logger.Error("delete failed emails from outbox", slog.Any("err", err))
+	} else if deletedFailedEmails > 0 {
+		s.logger.Info("deleted failed emails from outbox", slog.Int64("count", deletedFailedEmails))
+	}
+
 	deletedUsedTokens, err := s.q.DeleteUsedUserTokens(ctx)
 	if err != nil {
 		s.logger.Error("delete used user tokens", slog.Any("err", err))

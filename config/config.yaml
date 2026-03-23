@@ -84,5 +84,6 @@ mailer:
 scheduler:
   enabled: true
   email_outbox_every: 1m
+  email_outbox_retention: 720h
   cleanup_every: 1h
   inactivity_check_every: 24h

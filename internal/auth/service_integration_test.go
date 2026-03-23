@@ -554,7 +554,7 @@ func TestPasskeyBeginFlowsGenerateSessions(t *testing.T) {
 	if err := service.FinishPasskeyRegistration(ctx, user.ID, nil, []byte(`{}`), "Laptop key"); !errors.Is(err, ErrPasskeyCeremony) {
 		t.Fatalf("FinishPasskeyRegistration() error = %v, want %v", err, ErrPasskeyCeremony)
 	}
-	if _, err := service.FinishPasskeyLogin(ctx, nil, []byte(`{}`), ""); !errors.Is(err, ErrPasskeyCeremony) {
+	if _, err := service.FinishPasskeyLogin(ctx, nil, []byte(`{}`)); !errors.Is(err, ErrPasskeyCeremony) {
 		t.Fatalf("FinishPasskeyLogin() error = %v, want %v", err, ErrPasskeyCeremony)
 	}
 }

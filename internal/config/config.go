@@ -113,6 +113,7 @@ type MailerConfig struct {
 type SchedulerConfig struct {
 	Enabled              bool          `koanf:"enabled"`
 	EmailOutboxEvery     time.Duration `koanf:"email_outbox_every"`
+	EmailOutboxRetention time.Duration `koanf:"email_outbox_retention"`
 	CleanupEvery         time.Duration `koanf:"cleanup_every"`
 	InactivityCheckEvery time.Duration `koanf:"inactivity_check_every"`
 }
@@ -146,6 +147,9 @@ func Load() (Config, error) {
 	}
 	if cfg.OAuth.PKCEVerifierBytes <= 0 {
 		cfg.OAuth.PKCEVerifierBytes = 32
+	}
+	if cfg.Scheduler.EmailOutboxRetention <= 0 {
+		cfg.Scheduler.EmailOutboxRetention = 30 * 24 * time.Hour
 	}
 	if cfg.OAuth.Providers == nil {
 		cfg.OAuth.Providers = map[string]OAuthProviderConfig{}

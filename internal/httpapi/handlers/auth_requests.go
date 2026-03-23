@@ -79,17 +79,13 @@ func (r passkeyRegistrationRequest) Validate() error {
 
 type passkeyLoginRequest struct {
 	Credential json.RawMessage `json:"credential"`
-	TOTPCode   string          `json:"totp_code"`
 }
 
-func (r *passkeyLoginRequest) Normalize() {
-	r.TOTPCode = strings.TrimSpace(r.TOTPCode)
-}
+func (r *passkeyLoginRequest) Normalize() {}
 
 func (r passkeyLoginRequest) Validate() error {
 	err := validation.New()
 	validateCredential(err, r.Credential)
-	validateSecondFactor(err, r.TOTPCode)
 	return err.ErrOrNil()
 }
 
