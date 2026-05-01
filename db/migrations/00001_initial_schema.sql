@@ -102,16 +102,6 @@ CREATE TABLE IF NOT EXISTS email_outbox (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE TABLE IF NOT EXISTS scheduled_jobs (
-    id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    name TEXT NOT NULL UNIQUE,
-    last_run_at TIMESTAMPTZ,
-    last_success_at TIMESTAMPTZ,
-    last_error TEXT,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
 CREATE INDEX IF NOT EXISTS idx_sessions_expiry ON sessions (expiry);
 CREATE INDEX IF NOT EXISTS idx_passkey_credentials_user_id ON passkey_credentials (user_id);
 CREATE INDEX IF NOT EXISTS idx_user_tokens_expires_at ON user_tokens (expires_at) WHERE used_at IS NULL;
@@ -152,12 +142,7 @@ CREATE TRIGGER trg_email_outbox_updated_at
     BEFORE UPDATE ON email_outbox
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
-CREATE TRIGGER trg_scheduled_jobs_updated_at
-    BEFORE UPDATE ON scheduled_jobs
-    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
-
 -- +goose Down
-DROP TABLE IF EXISTS scheduled_jobs;
 DROP TABLE IF EXISTS email_outbox;
 DROP TABLE IF EXISTS user_roles;
 DROP TABLE IF EXISTS roles;

@@ -30,7 +30,6 @@ session:
 
 security:
   allowed_origins: []
-  csrf_secure: false
   encryption_key: 0123456789abcdef0123456789abcdef
   authorization_cache_ttl: 5s
   password_reset_ttl: 1h
@@ -81,9 +80,10 @@ mailer:
   password: ""
   require_tls: false
 
-scheduler:
+river:
   enabled: true
   email_outbox_every: 1m
   email_outbox_retention: 720h
   cleanup_every: 1h
   inactivity_check_every: 24h
+  max_workers: 100

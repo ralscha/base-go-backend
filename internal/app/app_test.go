@@ -151,10 +151,10 @@ func TestNewAndRunStartsAndStopsApp(t *testing.T) {
 			FailedLoginWindow:    15 * time.Minute,
 			TOTPIssuer:           "base-test",
 		},
-		OAuth:     config.OAuthConfig{StateTTL: 10 * time.Minute, StateBytes: 32, PKCEVerifierBytes: 32, Providers: map[string]config.OAuthProviderConfig{}},
-		WebAuthn:  config.WebAuthnConfig{RPID: "localhost", RPDisplayName: "Base Test", RPOrigins: []string{"http://localhost"}},
-		Mailer:    config.MailerConfig{Enabled: false},
-		Scheduler: config.SchedulerConfig{Enabled: false},
+		OAuth:    config.OAuthConfig{StateTTL: 10 * time.Minute, StateBytes: 32, PKCEVerifierBytes: 32, Providers: map[string]config.OAuthProviderConfig{}},
+		WebAuthn: config.WebAuthnConfig{RPID: "localhost", RPDisplayName: "Base Test", RPOrigins: []string{"http://localhost"}},
+		Mailer:   config.MailerConfig{Enabled: false},
+		River:    config.RiverConfig{Enabled: false},
 	})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)

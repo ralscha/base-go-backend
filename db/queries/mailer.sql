@@ -30,9 +30,9 @@ WHERE id = $1;
 -- name: MarkEmailFailed :exec
 UPDATE email_outbox
 SET attempts = attempts + 1,
-    last_error = $2,
-    available_at = NOW() + ($3 * INTERVAL '1 second')
-WHERE id = $1;
+    last_error = sqlc.arg(last_error),
+    available_at = NOW() + (sqlc.arg(retry_delay_seconds)::int * INTERVAL '1 second')
+WHERE id = sqlc.arg(id);
 
 -- name: DeleteSentEmailsBefore :execrows
 DELETE FROM email_outbox

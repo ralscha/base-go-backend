@@ -20,7 +20,7 @@ tasks:
       - go build -o ./bin/app ./cmd/app
 
   test:
-    desc: Run unit tests
+    desc: Run all tests
     cmds:
       - go test ./...
 
@@ -35,7 +35,7 @@ tasks:
   lint:
     desc: Run golangci-lint in a Docker container
     cmds:
-      - docker run --rm -v {{toSlash .ROOT_DIR}}:/app -w /app golangci/golangci-lint:v2.11.3 golangci-lint run -v --timeout 5m
+      - docker run --rm -v {{toSlash .ROOT_DIR}}:/app -w /app golangci/golangci-lint:v2.11.4 golangci-lint run -v --timeout 5m
 
   format:
     desc: Format Go code

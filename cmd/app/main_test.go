@@ -33,7 +33,7 @@ func TestRunStartsAndStopsApp(t *testing.T) {
 	t.Setenv("BASE_DATABASE_URL", databaseURL)
 	t.Setenv("BASE_DATABASE_MAX_OPEN_CONNS", "5")
 	t.Setenv("BASE_DATABASE_MAX_IDLE_CONNS", "2")
-	t.Setenv("BASE_SCHEDULER_ENABLED", "false")
+	t.Setenv("BASE_RIVER_ENABLED", "false")
 	t.Setenv("BASE_MAILER_ENABLED", "false")
 
 	listener, err := net.Listen("tcp", "127.0.0.1:0")

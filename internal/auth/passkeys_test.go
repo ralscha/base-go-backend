@@ -86,7 +86,15 @@ func TestCredentialFromRowUsesStoredCredentialDataWhenValid(t *testing.T) {
 		t.Fatalf("json.Marshal() error = %v", err)
 	}
 
-	got := credentialFromRow(sqlc.PasskeyCredential{CredentialData: encoded})
+	got := credentialFromRow(sqlc.PasskeyCredential{
+		CredentialData:      encoded,
+		AttestationType:     want.AttestationType,
+		CredentialID:        want.ID,
+		CredentialPublicKey: want.PublicKey,
+		SignCount:           int64(want.Authenticator.SignCount),
+		CloneWarning:        want.Authenticator.CloneWarning,
+		Transports:          []string{"usb"},
+	})
 	if !bytes.Equal(got.ID, want.ID) {
 		t.Fatalf("ID = %q, want %q", got.ID, want.ID)
 	}

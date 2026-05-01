@@ -81,7 +81,6 @@ func TestRunMigrationsCreatesSchemaAndCanBeReapplied(t *testing.T) {
 
 	assertRelationExists(t, ctx, db, "users")
 	assertRelationExists(t, ctx, db, "oauth_accounts")
-	assertRelationExists(t, ctx, db, "scheduled_jobs")
 
 	var passwordHashType sql.NullString
 	if err := db.QueryRowContext(ctx, `

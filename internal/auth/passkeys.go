@@ -264,6 +264,30 @@ func credentialFromRow(row sqlc.PasskeyCredential) wa.Credential {
 	if len(row.CredentialData) > 0 && string(row.CredentialData) != "{}" {
 		var credential wa.Credential
 		if err := json.Unmarshal(row.CredentialData, &credential); err == nil {
+			if len(credential.ID) == 0 {
+				credential.ID = row.CredentialID
+			}
+			if len(credential.PublicKey) == 0 {
+				credential.PublicKey = row.CredentialPublicKey
+			}
+			if credential.AttestationType == "" {
+				credential.AttestationType = row.AttestationType
+			}
+			if len(credential.Transport) == 0 && len(row.Transports) > 0 {
+				credential.Transport = make([]protocol.AuthenticatorTransport, 0, len(row.Transports))
+				for _, transport := range row.Transports {
+					credential.Transport = append(credential.Transport, protocol.AuthenticatorTransport(transport))
+				}
+			}
+			if credential.Authenticator.SignCount == 0 {
+				credential.Authenticator.SignCount = uint32(row.SignCount) //nolint:gosec // WebAuthn sign counter fits in uint32
+			}
+			if !credential.Authenticator.CloneWarning {
+				credential.Authenticator.CloneWarning = row.CloneWarning
+			}
+			if len(credential.Authenticator.AAGUID) == 0 && row.Aaguid.Valid {
+				credential.Authenticator.AAGUID = row.Aaguid.UUID[:]
+			}
 			return credential
 		}
 	}

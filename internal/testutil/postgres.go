@@ -5,7 +5,9 @@ import (
 	"database/sql"
 	"fmt"
 	"net/url"
+	"os"
 	"regexp"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -13,6 +15,7 @@ import (
 
 	"github.com/google/uuid"
 	_ "github.com/lib/pq"
+	"github.com/moby/moby/client"
 	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
 )
 
@@ -28,6 +31,7 @@ var (
 
 func FreshPostgresDatabaseURL(t *testing.T, ctx context.Context) string {
 	t.Helper()
+	ensureDockerHost(t)
 
 	adminURL, err := sharedPostgresConnectionString(ctx)
 	if err != nil {
@@ -130,4 +134,17 @@ func withDatabaseName(rawURL string, databaseName string) (string, error) {
 
 func quoteIdentifier(identifier string) string {
 	return `"` + strings.ReplaceAll(identifier, `"`, `""`) + `"`
+}
+
+func ensureDockerHost(t *testing.T) {
+	t.Helper()
+
+	if runtime.GOOS != "windows" {
+		return
+	}
+	if _, ok := os.LookupEnv("DOCKER_HOST"); ok {
+		return
+	}
+
+	t.Setenv("DOCKER_HOST", client.DefaultDockerHost)
 }

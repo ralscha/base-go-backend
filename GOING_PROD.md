@@ -56,6 +56,8 @@ That keeps the Go process private while Caddy accepts the public traffic.
 
 The default [config/config.yaml](config/config.yaml) is a development config. Do not use it unchanged in production.
 
+You can supply production settings through the YAML file, `BASE_` environment variables, or a mix of both. Environment variable names join config path segments with `_` while preserving snake_case field names, so `BASE_DATABASE_URL`, `BASE_DATABASE_MAX_OPEN_CONNS`, and `BASE_SECURITY_ALLOWED_ORIGINS=https://app.example.com,https://admin.example.com` all map cleanly to their config keys.
+
 At minimum, review and change these sections.
 
 ### App
@@ -79,9 +81,14 @@ http:
   write_timeout: 30s
   idle_timeout: 60s
   shutdown_timeout: 20s
+  trusted_proxies:
+    - 127.0.0.1/32
+    - ::1/128
 ```
 
 - Keep the app on a private bind address
+- Set `trusted_proxies` to the IPs or CIDRs of the reverse proxies that are allowed to supply `X-Forwarded-For` and `X-Real-IP`
+- If Caddy runs on the same host and connects over loopback, trust only loopback as shown above
 - Timeouts can stay as they are unless you have large uploads or long-lived requests
 
 ### Database
@@ -130,7 +137,6 @@ This is the most important section to review.
 security:
   allowed_origins:
     - https://app.example.com
-  csrf_secure: true
   encryption_key: CHANGE_ME_TO_A_LONG_RANDOM_SECRET
   password_reset_ttl: 1h
   email_verification_ttl: 24h
@@ -143,7 +149,6 @@ security:
 
 - Replace `encryption_key` with a strong random value of at least 32 characters
 - Do not reuse the default key from development
-- Set `csrf_secure: true` under HTTPS
 - Set `allowed_origins` to your actual frontend origin if the frontend is hosted separately
 - Set `totp_issuer` to your production brand or domain so authenticator apps show the right issuer name
 
@@ -186,17 +191,25 @@ mailer:
   require_tls: true
 ```
 
-### Scheduler
+### River (Background Jobs)
 
-The scheduler is responsible for email outbox processing and cleanup jobs.
+River handles email outbox processing, periodic cleanup, and inactivity checks.
 
 ```yaml
-scheduler:
+river:
   enabled: true
   email_outbox_every: 1m
+  email_outbox_retention: 720h
   cleanup_every: 1h
   inactivity_check_every: 24h
+  max_workers: 100
 ```
+
+- `email_outbox_retention` controls how long sent/failed emails are kept before deletion
+- `max_workers` must stay between `1` and `10000`; tune it based on your workload and process count
+- River interval values must stay greater than zero
+- The periodic email outbox job is inserted uniquely so only one outbox sweep can be queued or running at a time
+- River manages its own schema migrations automatically via `rivermigrate`
 
 Leave this enabled unless you move those jobs to a separate worker process.
 
@@ -215,9 +228,9 @@ api.example.com {
     header {
         Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
         X-Content-Type-Options "nosniff"
-      X-Frame-Options "DENY"
+        X-Frame-Options "DENY"
         Referrer-Policy "strict-origin-when-cross-origin"
-      Permissions-Policy "camera=(), microphone=(), geolocation=()"
+        Permissions-Policy "camera=(), microphone=(), geolocation=()"
     }
 }
 ```

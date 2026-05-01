@@ -18,7 +18,8 @@ import (
 
 func NewRouter(db *sql.DB, sessions *scs.SessionManager, authService *auth.Service, loginLimiter *ratelimit.RateLimiter, roleCache *cache.Cache[int64, []string], cfg config.Config) http.Handler {
 	r := chi.NewRouter()
-	r.Use(chimw.RealIP)
+	r.Use(appmw.RealIP(cfg.HTTP.TrustedProxies))
+	r.Use(appmw.CORS(cfg.Security.AllowedOrigins))
 	if cfg.App.Env != "production" {
 		r.Use(chimw.Logger)
 	}

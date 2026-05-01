@@ -17,7 +17,7 @@ import (
 	"base/internal/database"
 	"base/internal/httpapi"
 	"base/internal/mailer"
-	"base/internal/scheduler"
+	riverpkg "base/internal/river"
 
 	"github.com/alexedwards/scs/pgxstore"
 	"github.com/alexedwards/scs/v2"
@@ -31,7 +31,7 @@ type App struct {
 	db        *sql.DB
 	pgxPool   *pgxpool.Pool
 	server    *http.Server
-	scheduler *scheduler.Scheduler
+	river     *riverpkg.Client
 	sessions  *scs.SessionManager
 	sessionDB *pgxstore.PostgresStore
 }
@@ -65,12 +65,17 @@ func New(ctx context.Context, cfg config.Config) (*App, error) {
 	}
 
 	mailService := mailer.New(logger, cfg.Mailer)
-	jobScheduler := scheduler.Start(ctx, logger, db, mailService, authService, cfg)
+	riverClient, err := riverpkg.New(ctx, logger, db, pgxPool, mailService, authService, cfg)
+	if err != nil {
+		pgxPool.Close()
+		_ = db.Close()
+		return nil, err
+	}
 
 	roleCache := cache.New[int64](cfg.Security.AuthorizationCacheTTL, func(v []string) []string {
 		return append([]string(nil), v...)
 	})
-	jobScheduler.RegisterSweeper(roleCache.Sweep)
+	riverClient.RegisterSweeper(roleCache.Sweep)
 
 	loginLimiter := ratelimit.New(pgxPool, "public", ratelimit.BucketConfig{
 		Capacity:        10,
@@ -100,7 +105,7 @@ func New(ctx context.Context, cfg config.Config) (*App, error) {
 		db:        db,
 		pgxPool:   pgxPool,
 		server:    server,
-		scheduler: jobScheduler,
+		river:     riverClient,
 		sessions:  sessions,
 		sessionDB: sessionDB,
 	}, nil
@@ -124,14 +129,14 @@ func (a *App) Run(ctx context.Context) error {
 		if err := a.server.Shutdown(shutdownCtx); err != nil {
 			return fmt.Errorf("shutdown server: %w", err)
 		}
-		a.scheduler.Stop()
+		a.river.Stop(shutdownCtx)
 		if a.sessionDB != nil {
 			a.sessionDB.StopCleanup()
 		}
 		a.pgxPool.Close()
 		return a.db.Close()
 	case err := <-errCh:
-		a.scheduler.Stop()
+		a.river.Stop(context.Background())
 		if a.sessionDB != nil {
 			a.sessionDB.StopCleanup()
 		}
