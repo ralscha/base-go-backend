@@ -168,7 +168,7 @@ func (s *Service) Register(ctx context.Context, input RegisterInput) (SessionPri
 			Recipient:   user.Email,
 			Subject:     "Verify your account",
 			Payload:     payload,
-			AvailableAt: time.Now().UTC(),
+			AvailableAt: immediateEmailAvailableAt(),
 		}); err != nil {
 			return err
 		}
@@ -350,7 +350,7 @@ func (s *Service) RequestPasswordReset(ctx context.Context, email string) error 
 			Recipient:   user.Email,
 			Subject:     "Reset your password",
 			Payload:     payload,
-			AvailableAt: time.Now().UTC(),
+			AvailableAt: immediateEmailAvailableAt(),
 		})
 		return err
 	})
@@ -392,7 +392,7 @@ func (s *Service) RequestAccountRecovery(ctx context.Context, email string) erro
 			Recipient:   user.Email,
 			Subject:     "Recover your account",
 			Payload:     payload,
-			AvailableAt: time.Now().UTC(),
+			AvailableAt: immediateEmailAvailableAt(),
 		})
 		return err
 	})
@@ -698,4 +698,10 @@ func validateTOTPCode(secret, code string) bool {
 		Algorithm: otp.AlgorithmSHA1,
 	})
 	return err == nil && valid
+}
+
+func immediateEmailAvailableAt() time.Time {
+	// The outbox query compares against the database clock. A small backdate keeps
+	// immediate emails visible even when the app host is slightly ahead of Postgres.
+	return time.Now().UTC().Add(-time.Second)
 }

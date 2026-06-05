@@ -58,36 +58,36 @@ task lint
 
 ```
 .
-├── cmd/
-│   ├── app/                # Application entry point
-│   └── coveragefilter/     # Coverage report filter utility
-├── config/
-│   └── config.yaml         # Default configuration
-├── db/
-│   ├── migrations/         # Goose SQL migrations (embedded)
-│   └── queries/            # sqlc query definitions
-├── internal/
-│   ├── app/                # Application bootstrap and lifecycle
-│   ├── auth/               # Authentication & authorization logic
-│   ├── cache/              # Generic in-memory cache with TTL
-│   ├── config/             # Configuration loading and validation
-│   ├── database/           # Database connection and migration runner
-│   ├── httpapi/            # HTTP API layer
-│   │   ├── handlers/       # Request handlers
-│   │   ├── jsonio/         # JSON request/response helpers
-│   │   └── middleware/     # Auth middleware
-│   ├── mailer/             # SMTP mailer
-│   ├── river/              # River background job client and workers
-│   │   └── jobs/           # Job implementations
-│   ├── store/
-│   │   ├── dbtype/         # Custom database types (JSONB)
-│   │   └── sqlc/           # Generated sqlc code
-│   ├── testutil/           # Test helpers (Testcontainers PostgreSQL)
-│   └── validation/         # Request validation framework
-├── sqlc/                   # sqlc Docker build files
-├── docker-compose.yml      # Development services
-├── Taskfile.yml            # Task runner commands
-└── GOING_PROD.md           # Production deployment checklist
+|-- cmd/
+|   |-- app/                # Application entry point
+|   `-- coveragefilter/     # Coverage report filter utility
+|-- config/
+|   `-- config.yaml         # Default configuration
+|-- db/
+|   |-- migrations/         # Goose SQL migrations (embedded)
+|   `-- queries/            # sqlc query definitions
+|-- internal/
+|   |-- app/                # Application bootstrap and lifecycle
+|   |-- auth/               # Authentication and authorization logic
+|   |-- cache/              # Generic in-memory cache with TTL
+|   |-- config/             # Configuration loading and validation
+|   |-- database/           # Database connection and migration runner
+|   |-- httpapi/            # HTTP API layer
+|   |   |-- handlers/       # Request handlers
+|   |   |-- jsonio/         # JSON request/response helpers
+|   |   `-- middleware/     # HTTP middleware
+|   |-- mailer/             # SMTP mailer
+|   |-- river/              # River background job client and workers
+|   |   `-- jobs/           # Job implementations
+|   |-- store/
+|   |   |-- dbtype/         # Custom database types (JSONB)
+|   |   `-- sqlc/           # Generated sqlc code
+|   |-- testutil/           # Test helpers (Testcontainers PostgreSQL)
+|   `-- validation/         # Request validation framework
+|-- sqlc/                   # sqlc Docker build files
+|-- docker-compose.yml      # Development services
+|-- Taskfile.yml            # Task runner commands
+`-- GOING_PROD.md           # Production deployment checklist
 ```
 
 ## Configuration
@@ -155,11 +155,11 @@ See `config/config.yaml` for all options. See [GOING_PROD.md](GOING_PROD.md) for
 
 | Library | Version | Purpose |
 |---|---|---|
-| [github.com/go-chi/chi/v5](https://github.com/go-chi/chi) | v5.2.5 | HTTP router with middleware support |
-| [github.com/jackc/pgx/v5](https://github.com/jackc/pgx) | v5.9.2 | PostgreSQL driver and connection pool |
+| [github.com/go-chi/chi/v5](https://github.com/go-chi/chi) | v5.3.0 | HTTP router with middleware support |
+| [github.com/jackc/pgx/v5](https://github.com/jackc/pgx) | v5.10.0 | PostgreSQL driver and connection pool |
 | [github.com/alexedwards/scs/v2](https://github.com/alexedwards/scs) | v2.9.0 | HTTP session management |
-| [github.com/alexedwards/scs/pgxstore](https://github.com/alexedwards/scs) | latest | PostgreSQL session store for SCS |
-| [github.com/knadh/koanf/v2](https://github.com/knadh/koanf) | v2.3.4 | Configuration management (YAML + env) |
+| [github.com/alexedwards/scs/pgxstore](https://github.com/alexedwards/scs) | v0.0.0-20251002162104-209de6e426de | PostgreSQL session store for SCS |
+| [github.com/knadh/koanf/v2](https://github.com/knadh/koanf) | v2.3.5 | Configuration management (YAML + env) |
 
 ### Authentication & Security
 
@@ -167,7 +167,7 @@ See `config/config.yaml` for all options. See [GOING_PROD.md](GOING_PROD.md) for
 |---|---|---|
 | [github.com/alexedwards/argon2id](https://github.com/alexedwards/argon2id) | v1.0.0 | Argon2id password hashing |
 | [github.com/pquerna/otp](https://github.com/pquerna/otp) | v1.5.0 | TOTP (two-factor) generation and validation |
-| [github.com/go-webauthn/webauthn](https://github.com/go-webauthn/webauthn) | v0.17.0 | WebAuthn / Passkey authentication |
+| [github.com/go-webauthn/webauthn](https://github.com/go-webauthn/webauthn) | v0.17.4 | WebAuthn / Passkey authentication |
 | [github.com/golang-jwt/jwt/v5](https://github.com/golang-jwt/jwt) | v5.3.1 | JWT parsing (indirect, via WebAuthn) |
 | [github.com/google/uuid](https://github.com/google/uuid) | v1.6.0 | UUID generation (passkey AAGUID) |
 
@@ -175,7 +175,7 @@ See `config/config.yaml` for all options. See [GOING_PROD.md](GOING_PROD.md) for
 
 | Library | Version | Purpose |
 |---|---|---|
-| [github.com/riverqueue/river](https://github.com/riverqueue/river) | v0.35.1 | PostgreSQL-backed job queue (email outbox, cleanup, inactivity checks) |
+| [github.com/riverqueue/river](https://github.com/riverqueue/river) | v0.39.0 | PostgreSQL-backed job queue (email outbox, cleanup, inactivity checks) |
 
 ### Database & Migrations
 
@@ -188,7 +188,7 @@ See `config/config.yaml` for all options. See [GOING_PROD.md](GOING_PROD.md) for
 
 | Library | Version | Purpose |
 |---|---|---|
-| [github.com/ralscha/ratelimiter-pg](https://github.com/ralscha/ratelimiter-pg) | latest | PostgreSQL-backed token bucket rate limiter |
+| [github.com/ralscha/ratelimiter-pg](https://github.com/ralscha/ratelimiter-pg) | v0.0.0-20260531135312-9a7504910818 | PostgreSQL-backed token bucket rate limiter |
 
 ### Testing
 
@@ -202,7 +202,7 @@ See `config/config.yaml` for all options. See [GOING_PROD.md](GOING_PROD.md) for
 | Tool | Purpose |
 |---|---|
 | [sqlc](https://sqlc.dev/) (v1.30.0) | Type-safe SQL code generation (run via Docker) |
-| [golangci-lint](https://golangci-lint.run/) (v2.11.4) | Go linter (run via Docker) |
+| [golangci-lint](https://golangci-lint.run/) (v2.12.2) | Go linter (run via Docker) |
 | [Docker Compose](https://docs.docker.com/compose/) | Local PostgreSQL + Inbucket for development |
 | [Task](https://taskfile.dev/) | Build/test automation |
 

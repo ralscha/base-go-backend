@@ -370,7 +370,7 @@ Avoid these:
 3. Install Caddy and configure a reverse proxy for your hostname.
 4. Run the Go app on `127.0.0.1:8080`.
 5. Replace the default encryption key.
-6. Turn on secure cookies and secure CSRF behavior.
+6. Turn on secure cookies.
 7. Point the app at production Postgres with TLS.
 8. Configure SMTP.
 9. Update WebAuthn production domain settings if using passkeys.
