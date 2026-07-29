@@ -15,10 +15,10 @@ require (
 	github.com/knadh/koanf/providers/file v1.2.1
 	github.com/knadh/koanf/v2 v2.3.5
 	github.com/lib/pq v1.12.3
-	github.com/moby/moby/client v0.5.0
+	github.com/moby/moby/client v0.5.1
 	github.com/pquerna/otp v1.5.0
 	github.com/pressly/goose/v3 v3.27.3
-	github.com/ralscha/ratelimiter-pg v0.0.0-20260709201331-57fe96a1f224
+	github.com/ralscha/ratelimiter-pg v0.0.0-20260727035426-46be4b7c4044
 	github.com/riverqueue/river v0.41.0
 	github.com/riverqueue/river/riverdriver/riverpgxv5 v0.41.0
 	github.com/riverqueue/river/rivertype v0.41.0
@@ -39,7 +39,7 @@ require (
 	github.com/cpuguy83/dockercfg v0.3.2 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/distribution/reference v0.6.0 // indirect
-	github.com/docker/go-connections v0.7.0 // indirect
+	github.com/docker/go-connections v0.8.1 // indirect
 	github.com/docker/go-units v0.5.0 // indirect
 	github.com/ebitengine/purego v0.10.2 // indirect
 	github.com/felixge/httpsnoop v1.1.0 // indirect
@@ -98,7 +98,7 @@ require (
 	go.opentelemetry.io/otel/trace v1.44.0 // indirect
 	go.uber.org/goleak v1.3.0 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
-	go.yaml.in/yaml/v3 v3.0.4 // indirect
+	go.yaml.in/yaml/v3 v3.0.5 // indirect
 	golang.org/x/crypto v0.54.0 // indirect
 	golang.org/x/sync v0.22.0 // indirect
 	golang.org/x/sys v0.47.0 // indirect
