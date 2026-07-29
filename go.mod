@@ -18,7 +18,7 @@ require (
 	github.com/moby/moby/client v0.5.1
 	github.com/pquerna/otp v1.5.0
 	github.com/pressly/goose/v3 v3.27.3
-	github.com/ralscha/ratelimiter-pg v0.0.0-20260727035426-46be4b7c4044
+	github.com/ralscha/ratelimiter-pg v0.0.0-20260729043318-203786ec8fe9
 	github.com/riverqueue/river v0.41.0
 	github.com/riverqueue/river/riverdriver/riverpgxv5 v0.41.0
 	github.com/riverqueue/river/rivertype v0.41.0
