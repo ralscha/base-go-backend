@@ -4,6 +4,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"slices"
 	"strings"
 )
 
@@ -97,9 +98,9 @@ func clientAddrFromForwardedFor(header string, matcher trustedProxyMatcher) (net
 		addresses = append(addresses, addr)
 	}
 
-	for i := len(addresses) - 1; i >= 0; i-- {
-		if !matcher.Contains(addresses[i]) {
-			return addresses[i], true
+	for _, addresse := range slices.Backward(addresses) {
+		if !matcher.Contains(addresse) {
+			return addresse, true
 		}
 	}
 

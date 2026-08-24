@@ -202,7 +202,7 @@ See `config/config.yaml` for all options. See [GOING_PROD.md](GOING_PROD.md) for
 | Tool | Purpose |
 |---|---|
 | [sqlc](https://sqlc.dev/) (v1.30.0) | Type-safe SQL code generation (run via Docker) |
-| [golangci-lint](https://golangci-lint.run/) (v2.12.2) | Go linter (run via Docker) |
+| [golangci-lint](https://golangci-lint.run/) (v2.13.1) | Go linter (run via Docker) |
 | [Docker Compose](https://docs.docker.com/compose/) | Local PostgreSQL + Inbucket for development |
 | [Task](https://taskfile.dev/) | Build/test automation |
 
