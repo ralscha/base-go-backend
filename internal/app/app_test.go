@@ -159,6 +159,9 @@ func TestNewAndRunStartsAndStopsApp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
+	if got := application.pgxPool.Config().MaxConns; got != 5 {
+		t.Fatalf("pgx MaxConns = %d, want 5", got)
+	}
 
 	runCtx, cancel := context.WithCancel(context.Background())
 	errCh := make(chan error, 1)

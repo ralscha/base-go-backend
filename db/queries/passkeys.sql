@@ -20,6 +20,11 @@ FROM passkey_credentials
 WHERE user_id = $1
 ORDER BY id ASC;
 
+-- name: DeletePasskeyCredential :execrows
+DELETE FROM passkey_credentials
+WHERE id = $1
+  AND user_id = $2;
+
 -- name: UpdatePasskeyCredential :exec
 UPDATE passkey_credentials
 SET

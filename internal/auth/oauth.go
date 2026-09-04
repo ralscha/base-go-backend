@@ -174,7 +174,7 @@ func (provider configuredOAuthProvider) FetchProfile(ctx context.Context, access
 	profile := OAuthProfile{
 		Subject:       payloadString(payload, provider.config.SubjectField),
 		Email:         strings.ToLower(strings.TrimSpace(payloadString(payload, provider.config.EmailField))),
-		EmailVerified: payloadBool(payload, provider.config.EmailVerifiedField, true),
+		EmailVerified: payloadBool(payload, provider.config.EmailVerifiedField, false),
 		Username:      payloadString(payload, provider.config.UsernameField),
 		Name:          payloadString(payload, provider.config.NameField),
 	}
@@ -264,7 +264,7 @@ func (s *Service) completeOAuthFlow(ctx context.Context, queries *sqlc.Queries, 
 }
 
 func (s *Service) createOAuthUser(ctx context.Context, queries *sqlc.Queries, provider string, profile OAuthProfile) (sqlc.User, error) {
-	if strings.TrimSpace(profile.Email) == "" {
+	if strings.TrimSpace(profile.Email) == "" || !profile.EmailVerified {
 		return sqlc.User{}, ErrOAuthProfile
 	}
 
@@ -275,12 +275,10 @@ func (s *Service) createOAuthUser(ctx context.Context, queries *sqlc.Queries, pr
 	if err != nil {
 		return sqlc.User{}, err
 	}
-	if profile.EmailVerified {
-		if err := queries.MarkUserEmailVerified(ctx, createdUser.ID); err != nil {
-			return sqlc.User{}, err
-		}
-		createdUser.EmailVerifiedAt = sql.NullTime{Time: time.Now().UTC(), Valid: true}
+	if err := queries.MarkUserEmailVerified(ctx, createdUser.ID); err != nil {
+		return sqlc.User{}, err
 	}
+	createdUser.EmailVerifiedAt = sql.NullTime{Time: time.Now().UTC(), Valid: true}
 
 	role, err := queries.GetRoleByName(ctx, defaultUserRole)
 	if err != nil {

@@ -34,7 +34,12 @@ UPDATE users
 SET last_login_at = NOW(),
     last_seen_at = NOW(),
     failed_login_count = 0,
-    locked_until = NULL
+    last_failed_login_at = NULL,
+    locked_until = NULL,
+    disabled_reason = CASE
+        WHEN disabled_reason = 'failed_login_attempts' THEN NULL
+        ELSE disabled_reason
+    END
 WHERE id = $1;
 
 -- name: TouchUserSeen :exec
@@ -42,11 +47,34 @@ UPDATE users
 SET last_seen_at = NOW()
 WHERE id = $1;
 
--- name: IncrementFailedLogin :one
+-- name: IncrementUserAuthVersion :one
 UPDATE users
-SET failed_login_count = failed_login_count + 1
+SET auth_version = auth_version + 1
 WHERE id = $1
+RETURNING auth_version;
+
+-- name: RecordFailedLogin :one
+UPDATE users
+SET failed_login_count = CASE
+		WHEN last_failed_login_at IS NULL
+		  OR last_failed_login_at < NOW() - (sqlc.arg(window_seconds)::bigint * INTERVAL '1 second')
+        THEN 1
+        ELSE failed_login_count + 1
+    END,
+    last_failed_login_at = NOW()
+WHERE id = sqlc.arg(id)
 RETURNING *;
+
+-- name: ResetLoginFailures :exec
+UPDATE users
+SET failed_login_count = 0,
+    last_failed_login_at = NULL,
+    locked_until = NULL,
+    disabled_reason = CASE
+        WHEN disabled_reason = 'failed_login_attempts' THEN NULL
+        ELSE disabled_reason
+    END
+WHERE id = $1;
 
 -- name: LockUserUntil :exec
 UPDATE users
@@ -59,6 +87,7 @@ UPDATE users
 SET is_active = TRUE,
     email_verified_at = COALESCE(email_verified_at, NOW()),
     failed_login_count = 0,
+    last_failed_login_at = NULL,
     locked_until = NULL,
     disabled_reason = NULL,
     disabled_at = NULL

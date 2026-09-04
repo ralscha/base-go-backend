@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"math"
 	"reflect"
 	"strconv"
 	"strings"
@@ -164,6 +165,27 @@ func Load() (Config, error) {
 	if cfg.Security.AuthorizationCacheTTL <= 0 {
 		cfg.Security.AuthorizationCacheTTL = 5 * time.Second
 	}
+	if cfg.Security.PasswordResetTTL == 0 {
+		cfg.Security.PasswordResetTTL = time.Hour
+	}
+	if cfg.Security.EmailVerificationTTL == 0 {
+		cfg.Security.EmailVerificationTTL = 24 * time.Hour
+	}
+	if cfg.Security.RecoveryTTL == 0 {
+		cfg.Security.RecoveryTTL = 30 * time.Minute
+	}
+	if cfg.Security.FailedLoginThreshold == 0 {
+		cfg.Security.FailedLoginThreshold = 5
+	}
+	if cfg.Security.FailedLoginWindow == 0 {
+		cfg.Security.FailedLoginWindow = 15 * time.Minute
+	}
+	if cfg.Security.InactivityDisableAfter == 0 {
+		cfg.Security.InactivityDisableAfter = 365 * 24 * time.Hour
+	}
+	if cfg.Security.TOTPIssuer == "" {
+		cfg.Security.TOTPIssuer = cfg.App.Name
+	}
 	for name, provider := range cfg.OAuth.Providers {
 		if !provider.Enabled {
 			continue
@@ -174,9 +196,37 @@ func Load() (Config, error) {
 	}
 
 	const defaultEncryptionKey = "0123456789abcdef0123456789abcdef"
-	appEnv := strings.ToLower(cfg.App.Env)
+	appEnv := strings.ToLower(strings.TrimSpace(cfg.App.Env))
+	if appEnv != "development" && appEnv != "test" && appEnv != "production" {
+		return Config{}, fmt.Errorf("app.env must be development, test, or production")
+	}
+	cfg.App.Env = appEnv
+	if len(cfg.Security.EncryptionKey) < 32 {
+		return Config{}, fmt.Errorf("security.encryption_key must be at least 32 characters")
+	}
 	if cfg.Security.EncryptionKey == defaultEncryptionKey && appEnv != "development" && appEnv != "test" {
 		return Config{}, fmt.Errorf("security.encryption_key must be changed from the default value in non-development environments")
+	}
+	if cfg.Security.PasswordResetTTL < 0 || cfg.Security.EmailVerificationTTL < 0 || cfg.Security.RecoveryTTL < 0 {
+		return Config{}, fmt.Errorf("security token TTL values must be greater than zero")
+	}
+	if cfg.Security.FailedLoginThreshold < 1 {
+		return Config{}, fmt.Errorf("security.failed_login_threshold must be greater than zero")
+	}
+	if cfg.Security.FailedLoginWindow < 0 {
+		return Config{}, fmt.Errorf("security.failed_login_window must be greater than zero")
+	}
+	if cfg.Security.InactivityDisableAfter < 0 {
+		return Config{}, fmt.Errorf("security.inactivity_disable_after must be greater than zero")
+	}
+	if cfg.Database.MaxOpenConns < 0 || cfg.Database.MaxOpenConns > math.MaxInt32 {
+		return Config{}, fmt.Errorf("database.max_open_conns must be between 0 and %d", math.MaxInt32)
+	}
+	if cfg.Database.MaxIdleConns < 0 {
+		return Config{}, fmt.Errorf("database.max_idle_conns must not be negative")
+	}
+	if cfg.Mailer.Enabled && (strings.TrimSpace(cfg.Mailer.From) == "" || strings.TrimSpace(cfg.Mailer.Host) == "" || cfg.Mailer.Port < 1 || cfg.Mailer.Port > 65535) {
+		return Config{}, fmt.Errorf("mailer.from, mailer.host, and a valid mailer.port are required when mailer.enabled=true")
 	}
 	if cfg.River.Enabled {
 		if cfg.River.EmailOutboxEvery <= 0 {

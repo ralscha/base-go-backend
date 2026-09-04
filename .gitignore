@@ -11,8 +11,6 @@ vendor/
 *.log
 *.tmp
 *.test
-internal/store/sqlc/*.go
-!internal/store/sqlc/.keep
 coverage
 .vscode/
 .idea

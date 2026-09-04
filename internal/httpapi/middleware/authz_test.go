@@ -62,6 +62,32 @@ func TestRequireAuthenticatedAllowsSignedInRequests(t *testing.T) {
 	}
 }
 
+func TestRequireAuthenticatedRejectsAndDestroysInvalidSession(t *testing.T) {
+	sessions := scs.New()
+	protected := RequireAuthenticated(sessions, func(ctx context.Context, userID, authVersion int64) (bool, error) {
+		if userID != 42 || authVersion != 7 {
+			t.Fatalf("validator input = %d/%d, want 42/7", userID, authVersion)
+		}
+		return false, nil
+	})(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("next handler should not be called")
+	}))
+	handler := sessions.LoadAndSave(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sessions.Put(r.Context(), "user_id", int64(42))
+		sessions.Put(r.Context(), "auth_version", int64(7))
+		protected.ServeHTTP(w, r)
+		if got := sessions.GetInt64(r.Context(), "user_id"); got != 0 {
+			t.Fatalf("user_id after rejection = %d, want 0", got)
+		}
+	}))
+
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/", nil))
+	if recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusUnauthorized)
+	}
+}
+
 func TestRequireRolesAllowsAdminOverride(t *testing.T) {
 	sessions := scs.New()
 	nextCalled := false

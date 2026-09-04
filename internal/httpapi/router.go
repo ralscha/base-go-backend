@@ -13,10 +13,9 @@ import (
 	"github.com/alexedwards/scs/v2"
 	"github.com/go-chi/chi/v5"
 	chimw "github.com/go-chi/chi/v5/middleware"
-	ratelimit "github.com/ralscha/ratelimiter-pg"
 )
 
-func NewRouter(db *sql.DB, sessions *scs.SessionManager, authService *auth.Service, loginLimiter *ratelimit.RateLimiter, roleCache *cache.Cache[int64, []string], cfg config.Config) http.Handler {
+func NewRouter(db *sql.DB, sessions *scs.SessionManager, authService *auth.Service, roleCache *cache.Cache[int64, []string], cfg config.Config) http.Handler {
 	r := chi.NewRouter()
 	r.Use(appmw.RealIP(cfg.HTTP.TrustedProxies))
 	r.Use(appmw.CORS(cfg.Security.AllowedOrigins))
@@ -30,7 +29,7 @@ func NewRouter(db *sql.DB, sessions *scs.SessionManager, authService *auth.Servi
 	r.Use(chimw.NoCache)
 
 	health := handlers.HealthHandler{DB: db}
-	authHandler := handlers.AuthHandler{Service: authService, Sessions: sessions, Secure: cfg.Session.Secure, LoginRateLimiter: loginLimiter}
+	authHandler := handlers.AuthHandler{Service: authService, Sessions: sessions}
 	adminHandler := handlers.AdminHandler{Service: authService, Sessions: sessions}
 
 	r.Get("/health", health.Live)
@@ -40,6 +39,7 @@ func NewRouter(db *sql.DB, sessions *scs.SessionManager, authService *auth.Servi
 		api.Route("/auth", func(public chi.Router) {
 			public.Post("/register", authHandler.Register)
 			public.Get("/verify-email", authHandler.VerifyEmail)
+			public.Post("/verify-email/request", authHandler.RequestEmailVerification)
 			public.Post("/account-recovery/request", authHandler.RequestAccountRecovery)
 			public.Post("/account-recovery/confirm", authHandler.RecoverAccount)
 			public.Post("/password-reset/request", authHandler.RequestPasswordReset)
@@ -56,11 +56,13 @@ func NewRouter(db *sql.DB, sessions *scs.SessionManager, authService *auth.Servi
 
 			public.Group(func(protected chi.Router) {
 				protected.Use(sessions.LoadAndSave)
-				protected.Use(appmw.RequireAuthenticated(sessions))
+				protected.Use(appmw.RequireAuthenticated(sessions, authService.ValidateSession))
 				protected.Post("/logout", authHandler.Logout)
 				protected.Get("/me", authHandler.Me)
 				protected.Post("/passkeys/register/start", authHandler.BeginPasskeyRegistration)
 				protected.Post("/passkeys/register/finish", authHandler.FinishPasskeyRegistration)
+				protected.Get("/passkeys", authHandler.ListPasskeys)
+				protected.Delete("/passkeys/{passkeyID}", authHandler.DeletePasskey)
 				protected.Post("/totp/setup", authHandler.SetupTOTP)
 				protected.Post("/totp/enable", authHandler.EnableTOTP)
 				protected.Post("/totp/disable", authHandler.DisableTOTP)
@@ -69,7 +71,7 @@ func NewRouter(db *sql.DB, sessions *scs.SessionManager, authService *auth.Servi
 
 		api.Route("/admin", func(admin chi.Router) {
 			admin.Use(sessions.LoadAndSave)
-			admin.Use(appmw.RequireAuthenticated(sessions))
+			admin.Use(appmw.RequireAuthenticated(sessions, authService.ValidateSession))
 			admin.Use(appmw.RequireRoles(sessions, authService.UserRoleNames, roleCache, "admin"))
 			admin.Get("/access", adminHandler.Access)
 		})

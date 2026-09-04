@@ -59,6 +59,21 @@ func TestDecodeJSON(t *testing.T) {
 		response := decodeEnvelope(t, recorder)
 		assertAPIError(t, recorder, response, http.StatusBadRequest, "invalid_json", "invalid JSON body", nil)
 	})
+
+	t.Run("rejects trailing JSON values", func(t *testing.T) {
+		recorder := httptest.NewRecorder()
+		request := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"name":"first"} {"name":"second"}`))
+
+		var payload struct {
+			Name string `json:"name"`
+		}
+		if err := DecodeJSON(recorder, request, &payload); err == nil {
+			t.Fatal("DecodeJSON() error = nil, want non-nil")
+		}
+
+		response := decodeEnvelope(t, recorder)
+		assertAPIError(t, recorder, response, http.StatusBadRequest, "invalid_json", "invalid JSON body", nil)
+	})
 }
 
 func TestDecodeAndValidate(t *testing.T) {

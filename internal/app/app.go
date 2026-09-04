@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"os"
 	"strings"
-	"time"
 
 	"base/internal/auth"
 	"base/internal/cache"
@@ -22,7 +21,6 @@ import (
 	"github.com/alexedwards/scs/pgxstore"
 	"github.com/alexedwards/scs/v2"
 	"github.com/jackc/pgx/v5/pgxpool"
-	ratelimit "github.com/ralscha/ratelimiter-pg"
 )
 
 type App struct {
@@ -43,7 +41,17 @@ func New(ctx context.Context, cfg config.Config) (*App, error) {
 		return nil, err
 	}
 
-	pgxPool, err := pgxpool.New(ctx, cfg.Database.URL)
+	poolConfig, err := pgxpool.ParseConfig(cfg.Database.URL)
+	if err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("parse pgx pool config: %w", err)
+	}
+	if cfg.Database.MaxOpenConns > 0 {
+		poolConfig.MaxConns = int32(cfg.Database.MaxOpenConns) //nolint:gosec // practical connection counts fit in int32
+	}
+	poolConfig.MaxConnLifetime = cfg.Database.ConnMaxLifetime
+	poolConfig.MaxConnIdleTime = cfg.Database.ConnMaxIdleTime
+	pgxPool, err := pgxpool.NewWithConfig(ctx, poolConfig)
 	if err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("open pgx pool: %w", err)
@@ -77,19 +85,7 @@ func New(ctx context.Context, cfg config.Config) (*App, error) {
 	})
 	riverClient.RegisterSweeper(roleCache.Sweep)
 
-	loginLimiter := ratelimit.New(pgxPool, "public", ratelimit.BucketConfig{
-		Capacity:        10,
-		RefillPerSecond: 1.0 / 30.0, // 2 tokens/min → 120 attempts/hr sustained
-		CostPerRequest:  1,
-		DenyRetryFloor:  10 * time.Second,
-	})
-	if err := loginLimiter.Init(ctx); err != nil {
-		pgxPool.Close()
-		_ = db.Close()
-		return nil, fmt.Errorf("init login rate limiter: %w", err)
-	}
-
-	handler := httpapi.NewRouter(db, sessions, authService, loginLimiter, roleCache, cfg)
+	handler := httpapi.NewRouter(db, sessions, authService, roleCache, cfg)
 	server := &http.Server{
 		Addr:              cfg.HTTP.Address,
 		Handler:           handler,

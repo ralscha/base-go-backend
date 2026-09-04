@@ -123,6 +123,53 @@ security:
 	}
 }
 
+func TestLoadRejectsInvalidSecurityAndMailerConfiguration(t *testing.T) {
+	loadConfigMu.Lock()
+	defer loadConfigMu.Unlock()
+
+	testCases := []struct {
+		name      string
+		configYML string
+		want      string
+	}{
+		{
+			name: "short encryption key",
+			configYML: `
+app:
+  env: test
+security:
+  encryption_key: too-short
+`,
+			want: "security.encryption_key must be at least 32 characters",
+		},
+		{
+			name: "invalid mailer endpoint",
+			configYML: `
+app:
+  env: test
+security:
+  encryption_key: 0123456789abcdef0123456789abcdef
+mailer:
+  enabled: true
+  from: no-reply@example.com
+  host: ""
+  port: 70000
+`,
+			want: "mailer.from, mailer.host, and a valid mailer.port are required",
+		},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			writeConfigFixture(t, testCase.configYML)
+			_, err := Load()
+			if err == nil || !strings.Contains(err.Error(), testCase.want) {
+				t.Fatalf("Load() error = %v, want %q", err, testCase.want)
+			}
+		})
+	}
+}
+
 func TestLoadRejectsEnabledOAuthProviderWithMissingFields(t *testing.T) {
 	loadConfigMu.Lock()
 	defer loadConfigMu.Unlock()

@@ -96,6 +96,20 @@ func TestRunMigrationsCreatesSchemaAndCanBeReapplied(t *testing.T) {
 		t.Fatalf("users.password_hash data type = %q, want text", passwordHashType.String)
 	}
 
+	var authVersionType sql.NullString
+	if err := db.QueryRowContext(ctx, `
+		SELECT data_type
+		FROM information_schema.columns
+		WHERE table_schema = 'public'
+		  AND table_name = 'users'
+		  AND column_name = 'auth_version'
+	`).Scan(&authVersionType); err != nil {
+		t.Fatalf("query users.auth_version column: %v", err)
+	}
+	if !authVersionType.Valid || authVersionType.String != "bigint" {
+		t.Fatalf("users.auth_version data type = %q, want bigint", authVersionType.String)
+	}
+
 	var roleCount int
 	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM roles WHERE name IN ('admin', 'user')`).Scan(&roleCount); err != nil {
 		t.Fatalf("count seeded roles: %v", err)

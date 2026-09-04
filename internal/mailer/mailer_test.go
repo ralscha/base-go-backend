@@ -118,7 +118,7 @@ func TestSendRejectsInvalidPayloadBeforeSMTP(t *testing.T) {
 	}
 }
 
-func TestSendTLSDialError(t *testing.T) {
+func TestSendDialError(t *testing.T) {
 	mailer := New(slog.New(slog.NewTextHandler(io.Discard, nil)), config.MailerConfig{
 		Enabled:    true,
 		From:       "from@example.com",
@@ -134,7 +134,7 @@ func TestSendTLSDialError(t *testing.T) {
 		Subject:   "Hello",
 		Payload:   dbtype.RawMessage(`{"name":"alice"}`),
 	})
-	if err == nil || !strings.Contains(err.Error(), "tls dial smtp") {
-		t.Fatalf("Send() error = %v, want TLS dial error", err)
+	if err == nil || !strings.Contains(err.Error(), "dial smtp") {
+		t.Fatalf("Send() error = %v, want dial error", err)
 	}
 }

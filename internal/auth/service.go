@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"base/internal/config"
@@ -28,7 +29,9 @@ var (
 	ErrRequestFailed      = errors.New("request failed")
 	ErrTOTPRequired       = errors.New("two-factor authentication required")
 	ErrInvalidTOTP        = errors.New("invalid two-factor code")
+	ErrTOTPAlreadyEnabled = errors.New("two-factor authentication is already enabled")
 	ErrPasskeyCeremony    = errors.New("passkey ceremony not initialized")
+	ErrPasskeyNotFound    = errors.New("passkey not found")
 	ErrUnauthorized       = errors.New("authentication required")
 	ErrOAuthProvider      = errors.New("oauth provider is not configured")
 	ErrOAuthState         = errors.New("oauth state is invalid or expired")
@@ -52,6 +55,15 @@ type SessionPrincipal struct {
 	Roles       []string `json:"roles"`
 	TOTPEnabled bool     `json:"totp_enabled"`
 	Verified    bool     `json:"verified"`
+	AuthVersion int64    `json:"-"`
+}
+
+type RateLimitError struct {
+	RetryAfter time.Duration
+}
+
+func (e *RateLimitError) Error() string {
+	return fmt.Sprintf("rate limited: retry after %s", e.RetryAfter)
 }
 
 type TOTPSetup struct {
@@ -59,6 +71,14 @@ type TOTPSetup struct {
 	Issuer     string `json:"issuer"`
 	Account    string `json:"account"`
 	OTPAuthURL string `json:"otpauth_url"`
+}
+
+type Passkey struct {
+	ID         int64     `json:"id"`
+	Name       string    `json:"name"`
+	Transports []string  `json:"transports"`
+	CreatedAt  time.Time `json:"created_at"`
+	UpdatedAt  time.Time `json:"updated_at"`
 }
 
 type RegisterInput struct {
@@ -76,6 +96,13 @@ type LoginInput struct {
 }
 
 func NewService(ctx context.Context, db *sql.DB, pgxPool *pgxpool.Pool, cfg config.Config) (*Service, error) {
+	if cfg.Security.FailedLoginThreshold <= 0 {
+		return nil, errors.New("security.failed_login_threshold must be greater than zero")
+	}
+	if cfg.Security.FailedLoginWindow <= 0 {
+		return nil, errors.New("security.failed_login_window must be greater than zero")
+	}
+
 	limitCfg := ratelimit.BucketConfig{
 		Capacity:        float64(cfg.Security.FailedLoginThreshold),
 		RefillPerSecond: float64(cfg.Security.FailedLoginThreshold) / cfg.Security.FailedLoginWindow.Seconds(),
@@ -114,8 +141,8 @@ func (s *Service) RateLimiter() *ratelimit.RateLimiter {
 }
 
 func (s *Service) Register(ctx context.Context, input RegisterInput) (SessionPrincipal, error) {
-	username := input.Username
-	email := input.Email
+	username := strings.ToLower(strings.TrimSpace(input.Username))
+	email := strings.ToLower(strings.TrimSpace(input.Email))
 
 	passwordHash, err := HashPassword(input.Password)
 	if err != nil {
@@ -187,7 +214,7 @@ func (s *Service) Register(ctx context.Context, input RegisterInput) (SessionPri
 }
 
 func (s *Service) LoginWithPassword(ctx context.Context, input LoginInput) (SessionPrincipal, error) {
-	email := input.Email
+	email := strings.ToLower(strings.TrimSpace(input.Email))
 
 	if err := s.enforceRateLimit(ctx, email, input.IPAddress); err != nil {
 		return SessionPrincipal{}, err
@@ -239,6 +266,13 @@ func (s *Service) LoginWithPassword(ctx context.Context, input LoginInput) (Sess
 func (s *Service) BeginTOTPSetup(ctx context.Context, userID int64) (TOTPSetup, error) {
 	user, err := s.queries.GetUserByID(ctx, userID)
 	if err != nil {
+		return TOTPSetup{}, err
+	}
+	configRow, err := s.queries.GetTotpConfigurationByUserID(ctx, userID)
+	if err == nil && configRow.EnabledAt.Valid {
+		return TOTPSetup{}, ErrTOTPAlreadyEnabled
+	}
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return TOTPSetup{}, err
 	}
 
@@ -298,103 +332,42 @@ func (s *Service) DisableTOTP(ctx context.Context, userID int64) error {
 }
 
 func (s *Service) VerifyEmail(ctx context.Context, token string) error {
-	tokenRow, err := s.queries.GetUserToken(ctx, sqlc.GetUserTokenParams{
-		TokenHash: HashToken(token),
-		Kind:      sqlc.TokenKindEmailVerification,
-	})
-	if err != nil {
-		return err
-	}
-
 	return s.withTx(ctx, func(q *sqlc.Queries) error {
+		tokenRow, err := q.ConsumeUserToken(ctx, sqlc.ConsumeUserTokenParams{
+			TokenHash: HashToken(strings.TrimSpace(token)),
+			Kind:      sqlc.TokenKindEmailVerification,
+		})
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrRequestFailed
+		}
+		if err != nil {
+			return err
+		}
 		if err := q.MarkUserEmailVerified(ctx, tokenRow.UserID); err != nil {
 			return err
 		}
-		return q.UseUserToken(ctx, tokenRow.ID)
+		return nil
 	})
 }
 
 func (s *Service) RequestPasswordReset(ctx context.Context, email string) error {
-	user, err := s.queries.GetUserByEmail(ctx, email)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil
-		}
-		return err
-	}
-
-	plainToken, tokenHash, err := NewToken()
-	if err != nil {
-		return err
-	}
-
-	payload, err := json.Marshal(map[string]any{
-		"token": plainToken,
-		"email": user.Email,
-	})
-	if err != nil {
-		return err
-	}
-
-	return s.withTx(ctx, func(q *sqlc.Queries) error {
-		if _, err := q.CreateUserToken(ctx, sqlc.CreateUserTokenParams{
-			UserID:    user.ID,
-			Kind:      sqlc.TokenKindPasswordReset,
-			TokenHash: tokenHash,
-			ExpiresAt: time.Now().UTC().Add(s.cfg.Security.PasswordResetTTL),
-		}); err != nil {
-			return err
-		}
-		_, err := q.EnqueueEmail(ctx, sqlc.EnqueueEmailParams{
-			Template:    "password-reset",
-			Recipient:   user.Email,
-			Subject:     "Reset your password",
-			Payload:     payload,
-			AvailableAt: immediateEmailAvailableAt(),
-		})
-		return err
+	return s.requestTokenEmail(ctx, email, tokenEmailRequest{
+		kind: sqlc.TokenKindPasswordReset, ttl: s.cfg.Security.PasswordResetTTL,
+		template: "password-reset", subject: "Reset your password",
 	})
 }
 
 func (s *Service) RequestAccountRecovery(ctx context.Context, email string) error {
-	user, err := s.queries.GetUserByEmail(ctx, email)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil
-		}
-		return err
-	}
-
-	plainToken, tokenHash, err := NewToken()
-	if err != nil {
-		return err
-	}
-
-	payload, err := json.Marshal(map[string]any{
-		"token": plainToken,
-		"email": user.Email,
+	return s.requestTokenEmail(ctx, email, tokenEmailRequest{
+		kind: sqlc.TokenKindAccountRecovery, ttl: s.cfg.Security.RecoveryTTL,
+		template: "account-recovery", subject: "Recover your account",
 	})
-	if err != nil {
-		return err
-	}
+}
 
-	return s.withTx(ctx, func(q *sqlc.Queries) error {
-		if _, err := q.CreateUserToken(ctx, sqlc.CreateUserTokenParams{
-			UserID:    user.ID,
-			Kind:      sqlc.TokenKindAccountRecovery,
-			TokenHash: tokenHash,
-			ExpiresAt: time.Now().UTC().Add(s.cfg.Security.RecoveryTTL),
-		}); err != nil {
-			return err
-		}
-		_, err := q.EnqueueEmail(ctx, sqlc.EnqueueEmailParams{
-			Template:    "account-recovery",
-			Recipient:   user.Email,
-			Subject:     "Recover your account",
-			Payload:     payload,
-			AvailableAt: immediateEmailAvailableAt(),
-		})
-		return err
+func (s *Service) RequestEmailVerification(ctx context.Context, email string) error {
+	return s.requestTokenEmail(ctx, email, tokenEmailRequest{
+		kind: sqlc.TokenKindEmailVerification, ttl: s.cfg.Security.EmailVerificationTTL,
+		template: "verify-email", subject: "Verify your account", onlyUnverified: true,
 	})
 }
 
@@ -404,18 +377,17 @@ func (s *Service) RecoverAccount(ctx context.Context, token string, password str
 		return err
 	}
 
-	tokenRow, err := s.queries.GetUserToken(ctx, sqlc.GetUserTokenParams{
-		TokenHash: HashToken(token),
-		Kind:      sqlc.TokenKindAccountRecovery,
-	})
-	if err != nil {
+	return s.withTx(ctx, func(q *sqlc.Queries) error {
+		tokenRow, err := q.ConsumeUserToken(ctx, sqlc.ConsumeUserTokenParams{
+			TokenHash: HashToken(strings.TrimSpace(token)),
+			Kind:      sqlc.TokenKindAccountRecovery,
+		})
 		if errors.Is(err, sql.ErrNoRows) {
 			return ErrRequestFailed
 		}
-		return err
-	}
-
-	return s.withTx(ctx, func(q *sqlc.Queries) error {
+		if err != nil {
+			return err
+		}
 		if _, err := q.SetUserPasswordHash(ctx, sqlc.SetUserPasswordHashParams{ID: tokenRow.UserID, PasswordHash: sql.NullString{String: passwordHash, Valid: true}}); err != nil {
 			return err
 		}
@@ -425,7 +397,8 @@ func (s *Service) RecoverAccount(ctx context.Context, token string, password str
 		if err := q.DeleteTotpConfigurationByUserID(ctx, tokenRow.UserID); err != nil {
 			return err
 		}
-		return q.UseUserToken(ctx, tokenRow.ID)
+		_, err = q.IncrementUserAuthVersion(ctx, tokenRow.UserID)
+		return err
 	})
 }
 
@@ -435,25 +408,24 @@ func (s *Service) ResetPassword(ctx context.Context, token string, password stri
 		return err
 	}
 
-	tokenRow, err := s.queries.GetUserToken(ctx, sqlc.GetUserTokenParams{
-		TokenHash: HashToken(token),
-		Kind:      sqlc.TokenKindPasswordReset,
-	})
-	if err != nil {
+	return s.withTx(ctx, func(q *sqlc.Queries) error {
+		tokenRow, err := q.ConsumeUserToken(ctx, sqlc.ConsumeUserTokenParams{
+			TokenHash: HashToken(strings.TrimSpace(token)),
+			Kind:      sqlc.TokenKindPasswordReset,
+		})
 		if errors.Is(err, sql.ErrNoRows) {
 			return ErrRequestFailed
 		}
-		return err
-	}
-
-	return s.withTx(ctx, func(q *sqlc.Queries) error {
+		if err != nil {
+			return err
+		}
 		if _, err := q.SetUserPasswordHash(ctx, sqlc.SetUserPasswordHashParams{ID: tokenRow.UserID, PasswordHash: sql.NullString{String: passwordHash, Valid: true}}); err != nil {
 			return err
 		}
-		if err := q.UseUserToken(ctx, tokenRow.ID); err != nil {
+		if _, err := q.IncrementUserAuthVersion(ctx, tokenRow.UserID); err != nil {
 			return err
 		}
-		return q.LockUserUntil(ctx, sqlc.LockUserUntilParams{ID: tokenRow.UserID})
+		return q.ResetLoginFailures(ctx, tokenRow.UserID)
 	})
 }
 
@@ -461,16 +433,24 @@ func (s *Service) CurrentUser(ctx context.Context, userID int64) (SessionPrincip
 	if userID == 0 {
 		return SessionPrincipal{}, ErrUnauthorized
 	}
+	return s.completeUserAuthentication(ctx, s.queries, userID, false)
+}
 
+func (s *Service) ValidateSession(ctx context.Context, userID, authVersion int64) (bool, error) {
+	if userID == 0 || authVersion == 0 {
+		return false, nil
+	}
 	user, err := s.queries.GetUserByID(ctx, userID)
 	if err != nil {
-		return SessionPrincipal{}, err
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil
+		}
+		return false, err
 	}
-	roles, err := s.queries.ListUserRoleNames(ctx, userID)
-	if err != nil {
-		return SessionPrincipal{}, err
+	if !userAccountIsUsable(user) {
+		return false, nil
 	}
-	return s.principalWithFactors(ctx, user, roles)
+	return user.AuthVersion == authVersion, nil
 }
 
 func (s *Service) UserRoleNames(ctx context.Context, userID int64) ([]string, error) {
@@ -478,6 +458,13 @@ func (s *Service) UserRoleNames(ctx context.Context, userID int64) ([]string, er
 		return nil, ErrUnauthorized
 	}
 
+	user, err := s.queries.GetUserByID(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateUserAccount(user); err != nil {
+		return nil, err
+	}
 	roles, err := s.queries.ListUserRoleNames(ctx, userID)
 	if err != nil {
 		return nil, err
@@ -520,7 +507,8 @@ func (s *Service) CompleteOAuthAuthentication(ctx context.Context, provider stri
 	if err != nil {
 		return OAuthAuthenticationResult{}, err
 	}
-	if time.Since(flowState.StartedAt) > s.cfg.OAuth.StateTTL {
+	now := time.Now().UTC()
+	if flowState.StartedAt.IsZero() || flowState.StartedAt.After(now.Add(time.Minute)) || now.Sub(flowState.StartedAt) > s.cfg.OAuth.StateTTL {
 		return OAuthAuthenticationResult{}, ErrOAuthState
 	}
 
@@ -543,7 +531,7 @@ func (s *Service) CompleteOAuthAuthentication(ctx context.Context, provider stri
 	if err != nil {
 		return OAuthAuthenticationResult{}, fmt.Errorf("fetch oauth profile: %w", err)
 	}
-	if profile.Subject == "" || profile.Email == "" {
+	if profile.Subject == "" || profile.Email == "" || !profile.EmailVerified {
 		return OAuthAuthenticationResult{}, ErrOAuthProfile
 	}
 
@@ -569,7 +557,7 @@ func (s *Service) enforceRateLimit(ctx context.Context, email, ip string) error 
 		return err
 	}
 	if !decision.Allowed {
-		return fmt.Errorf("rate limited: retry after %s", decision.RetryAfter)
+		return &RateLimitError{RetryAfter: decision.RetryAfter}
 	}
 
 	if ip == "" {
@@ -586,14 +574,18 @@ func (s *Service) enforceRateLimit(ctx context.Context, email, ip string) error 
 		return err
 	}
 	if !ipDecision.Allowed {
-		return fmt.Errorf("rate limited: retry after %s", ipDecision.RetryAfter)
+		return &RateLimitError{RetryAfter: ipDecision.RetryAfter}
 	}
 
 	return nil
 }
 
 func (s *Service) handleFailedLogin(ctx context.Context, user sqlc.User) error {
-	updatedUser, err := s.queries.IncrementFailedLogin(ctx, user.ID)
+	windowSeconds := max(int64(1), int64(s.cfg.Security.FailedLoginWindow/time.Second))
+	updatedUser, err := s.queries.RecordFailedLogin(ctx, sqlc.RecordFailedLoginParams{
+		ID:            user.ID,
+		WindowSeconds: windowSeconds,
+	})
 	if err != nil {
 		return err
 	}
@@ -601,7 +593,7 @@ func (s *Service) handleFailedLogin(ctx context.Context, user sqlc.User) error {
 	if int64(updatedUser.FailedLoginCount) >= int64(s.cfg.Security.FailedLoginThreshold) {
 		return s.queries.LockUserUntil(ctx, sqlc.LockUserUntilParams{
 			ID:             user.ID,
-			LockedUntil:    sql.NullTime{Time: time.Now().UTC().Add(100 * 365 * 24 * time.Hour), Valid: true},
+			LockedUntil:    sql.NullTime{Time: time.Now().UTC().Add(s.cfg.Security.FailedLoginWindow), Valid: true},
 			DisabledReason: sql.NullString{String: "failed_login_attempts", Valid: true},
 		})
 	}
@@ -610,16 +602,29 @@ func (s *Service) handleFailedLogin(ctx context.Context, user sqlc.User) error {
 }
 
 func (s *Service) oauthProvider(name string) (OAuthProviderClient, string, error) {
-	provider, ok := s.oauth[name]
+	normalizedName := strings.ToLower(strings.TrimSpace(name))
+	provider, ok := s.oauth[normalizedName]
 	if !ok {
 		return nil, "", ErrOAuthProvider
 	}
-	return provider, name, nil
+	return provider, normalizedName, nil
 }
 
 func (s *Service) completeUserAuthentication(ctx context.Context, queries *sqlc.Queries, userID int64, updateLastLogin bool) (SessionPrincipal, error) {
+	user, err := queries.GetUserByID(ctx, userID)
+	if err != nil {
+		return SessionPrincipal{}, err
+	}
+	if err := validateUserAccount(user); err != nil {
+		return SessionPrincipal{}, err
+	}
+
 	if updateLastLogin {
 		if err := queries.UpdateUserLastLogin(ctx, userID); err != nil {
+			return SessionPrincipal{}, err
+		}
+		user, err = queries.GetUserByID(ctx, userID)
+		if err != nil {
 			return SessionPrincipal{}, err
 		}
 	}
@@ -628,27 +633,43 @@ func (s *Service) completeUserAuthentication(ctx context.Context, queries *sqlc.
 	if err != nil {
 		return SessionPrincipal{}, err
 	}
-	updatedUser, err := queries.GetUserByID(ctx, userID)
-	if err != nil {
-		return SessionPrincipal{}, err
-	}
 
-	return s.principalWithFactors(ctx, updatedUser, roles)
+	return s.principalWithFactors(ctx, queries, user, roles)
 }
 
 func principalFromUser(user sqlc.User, roles []string) SessionPrincipal {
 	return SessionPrincipal{
-		UserID:   user.ID,
-		Username: user.Username,
-		Email:    user.Email,
-		Roles:    roles,
-		Verified: user.EmailVerifiedAt.Valid,
+		UserID:      user.ID,
+		Username:    user.Username,
+		Email:       user.Email,
+		Roles:       roles,
+		Verified:    user.EmailVerifiedAt.Valid,
+		AuthVersion: user.AuthVersion,
 	}
 }
 
-func (s *Service) principalWithFactors(ctx context.Context, user sqlc.User, roles []string) (SessionPrincipal, error) {
+func validateUserAccount(user sqlc.User) error {
+	if !user.IsActive {
+		return ErrAccountDisabled
+	}
+	if user.LockedUntil.Valid && user.LockedUntil.Time.After(time.Now().UTC()) {
+		return ErrAccountLocked
+	}
+	if !user.EmailVerifiedAt.Valid {
+		return ErrEmailUnverified
+	}
+	return nil
+}
+
+func userAccountIsUsable(user sqlc.User) bool {
+	return user.IsActive &&
+		(!user.LockedUntil.Valid || !user.LockedUntil.Time.After(time.Now().UTC())) &&
+		user.EmailVerifiedAt.Valid
+}
+
+func (s *Service) principalWithFactors(ctx context.Context, queries *sqlc.Queries, user sqlc.User, roles []string) (SessionPrincipal, error) {
 	principal := principalFromUser(user, roles)
-	configRow, err := s.queries.GetTotpConfigurationByUserID(ctx, user.ID)
+	configRow, err := queries.GetTotpConfigurationByUserID(ctx, user.ID)
 	if err == nil && configRow.EnabledAt.Valid {
 		principal.TOTPEnabled = true
 		return principal, nil
@@ -698,6 +719,53 @@ func validateTOTPCode(secret, code string) bool {
 		Algorithm: otp.AlgorithmSHA1,
 	})
 	return err == nil && valid
+}
+
+type tokenEmailRequest struct {
+	kind           sqlc.TokenKind
+	ttl            time.Duration
+	template       string
+	subject        string
+	onlyUnverified bool
+}
+
+func (s *Service) requestTokenEmail(ctx context.Context, email string, request tokenEmailRequest) error {
+	user, err := s.queries.GetUserByEmail(ctx, strings.ToLower(strings.TrimSpace(email)))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if request.onlyUnverified && user.EmailVerifiedAt.Valid {
+		return nil
+	}
+
+	plainToken, tokenHash, err := NewToken()
+	if err != nil {
+		return err
+	}
+	payload, err := json.Marshal(map[string]any{"token": plainToken, "email": user.Email})
+	if err != nil {
+		return err
+	}
+
+	return s.withTx(ctx, func(q *sqlc.Queries) error {
+		if err := q.ExpireUserTokens(ctx, sqlc.ExpireUserTokensParams{UserID: user.ID, Kind: request.kind}); err != nil {
+			return err
+		}
+		if _, err := q.CreateUserToken(ctx, sqlc.CreateUserTokenParams{
+			UserID: user.ID, Kind: request.kind, TokenHash: tokenHash,
+			ExpiresAt: time.Now().UTC().Add(request.ttl),
+		}); err != nil {
+			return err
+		}
+		_, err := q.EnqueueEmail(ctx, sqlc.EnqueueEmailParams{
+			Template: request.template, Recipient: user.Email, Subject: request.subject,
+			Payload: payload, AvailableAt: immediateEmailAvailableAt(),
+		})
+		return err
+	})
 }
 
 func immediateEmailAvailableAt() time.Time {

@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"base/internal/auth"
 	"base/internal/validation"
@@ -78,7 +79,9 @@ func TestHandleAuthErrorMappings(t *testing.T) {
 		{name: "email unverified", err: auth.ErrEmailUnverified, status: http.StatusForbidden, code: "email_unverified", message: auth.ErrEmailUnverified.Error()},
 		{name: "totp required", err: auth.ErrTOTPRequired, status: http.StatusUnauthorized, code: "totp_required", message: auth.ErrTOTPRequired.Error()},
 		{name: "invalid totp", err: auth.ErrInvalidTOTP, status: http.StatusUnauthorized, code: "invalid_totp", message: auth.ErrInvalidTOTP.Error()},
+		{name: "totp already enabled", err: auth.ErrTOTPAlreadyEnabled, status: http.StatusConflict, code: "totp_already_enabled", message: auth.ErrTOTPAlreadyEnabled.Error()},
 		{name: "passkey", err: auth.ErrPasskeyCeremony, status: http.StatusBadRequest, code: "passkey_ceremony_missing", message: auth.ErrPasskeyCeremony.Error()},
+		{name: "passkey not found", err: auth.ErrPasskeyNotFound, status: http.StatusNotFound, code: "passkey_not_found", message: auth.ErrPasskeyNotFound.Error()},
 		{name: "oauth provider", err: auth.ErrOAuthProvider, status: http.StatusBadRequest, code: "oauth_provider_invalid", message: auth.ErrOAuthProvider.Error()},
 		{name: "oauth state", err: auth.ErrOAuthState, status: http.StatusBadRequest, code: "oauth_state_invalid", message: auth.ErrOAuthState.Error()},
 		{name: "oauth conflict", err: auth.ErrOAuthConflict, status: http.StatusConflict, code: "oauth_conflict", message: auth.ErrOAuthConflict.Error()},
@@ -180,6 +183,18 @@ func TestHandlePasswordLoginErrorPreservesSecondFactorErrors(t *testing.T) {
 	}
 }
 
+func TestHandlePasswordLoginErrorReturnsRateLimitMetadata(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	handlePasswordLoginError(recorder, &auth.RateLimitError{RetryAfter: 1500 * time.Millisecond})
+
+	if recorder.Code != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusTooManyRequests)
+	}
+	if got := recorder.Header().Get("Retry-After"); got != "2" {
+		t.Fatalf("Retry-After = %q, want 2", got)
+	}
+}
+
 func TestClientIP(t *testing.T) {
 	request := httptest.NewRequest(http.MethodGet, "/", nil)
 	request.RemoteAddr = "192.168.1.9:8080"
@@ -209,6 +224,16 @@ func TestVerifyEmailRequiresToken(t *testing.T) {
 	}
 	if response.Error == nil || response.Error.Code != "missing_token" {
 		t.Fatalf("response = %+v, want missing_token error", response)
+	}
+}
+
+func TestDeletePasskeyRejectsInvalidID(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	request := withChiURLParam(httptest.NewRequest(http.MethodDelete, "/passkeys/not-a-number", nil), "passkeyID", "not-a-number")
+
+	AuthHandler{}.DeletePasskey(recorder, request)
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusBadRequest)
 	}
 }
 

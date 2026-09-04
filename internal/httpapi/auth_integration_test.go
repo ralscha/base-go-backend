@@ -28,7 +28,6 @@ import (
 	"github.com/alexedwards/scs/v2"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pquerna/otp/totp"
-	ratelimit "github.com/ralscha/ratelimiter-pg"
 )
 
 func TestAccountRecoveryFlowReactivatesUserAndClearsTOTP(t *testing.T) {
@@ -370,6 +369,10 @@ func TestFailedPasswordLoginsUseUserCounterForLockout(t *testing.T) {
 	if !updatedUser.LockedUntil.Valid {
 		t.Fatal("expected user to be locked after reaching failed login threshold")
 	}
+	remainingLock := time.Until(updatedUser.LockedUntil.Time)
+	if remainingLock <= 0 || remainingLock > 16*time.Minute {
+		t.Fatalf("remaining lock = %v, want configured failed-login window", remainingLock)
+	}
 	if !updatedUser.DisabledReason.Valid || updatedUser.DisabledReason.String != "failed_login_attempts" {
 		t.Fatalf("disabled_reason = %q, want %q", updatedUser.DisabledReason.String, "failed_login_attempts")
 	}
@@ -465,6 +468,16 @@ func TestPasswordLoginPersistsSessionForAuthenticatedRoutes(t *testing.T) {
 	}
 	if body.Data.User.Username != user.Username {
 		t.Fatalf("me username = %q, want %q", body.Data.User.Username, user.Username)
+	}
+
+	if _, err := env.queries.IncrementUserAuthVersion(ctx, user.ID); err != nil {
+		t.Fatalf("IncrementUserAuthVersion() error = %v", err)
+	}
+	revokedResp := mustDoRequest(t, client, newRequest(t, ctx, http.MethodGet, env.server.URL+"/api/v1/auth/me", nil))
+	defer func() { _ = revokedResp.Body.Close() }()
+	if revokedResp.StatusCode != http.StatusUnauthorized {
+		body, _ := io.ReadAll(revokedResp.Body)
+		t.Fatalf("revoked session status = %d, want %d, body = %s", revokedResp.StatusCode, http.StatusUnauthorized, strings.TrimSpace(string(body)))
 	}
 }
 
@@ -1050,20 +1063,10 @@ func newIntegrationEnvWithConfig(t *testing.T, ctx context.Context, configure fu
 	sessions.Lifetime = appCfg.Session.Lifetime
 	sessions.IdleTimeout = appCfg.Session.IdleTimeout
 
-	loginLimiter := ratelimit.New(pool, "public", ratelimit.BucketConfig{
-		Capacity:        5,
-		RefillPerSecond: 1.0 / 60.0,
-		CostPerRequest:  1,
-		DenyRetryFloor:  time.Second,
-	})
-	if err := loginLimiter.Init(ctx); err != nil {
-		t.Fatalf("loginLimiter.Init() error = %v", err)
-	}
-
 	roleCache := cache.New[int64](appCfg.Security.AuthorizationCacheTTL, func(v []string) []string {
 		return append([]string(nil), v...)
 	})
-	handler := httpapi.NewRouter(db, sessions, authService, loginLimiter, roleCache, appCfg)
+	handler := httpapi.NewRouter(db, sessions, authService, roleCache, appCfg)
 	server := httptest.NewServer(handler)
 	t.Cleanup(server.Close)
 
@@ -1131,6 +1134,7 @@ func (provider *oauthTestProvider) serveHTTP(w http.ResponseWriter, r *http.Requ
 			Name:          "Authorize Flow",
 		})
 		redirectTo := redirectURI + "?state=" + url.QueryEscape(state) + "&code=" + url.QueryEscape(code)
+		//nolint:gosec // Test provider redirects only to callback URLs supplied by in-process test clients.
 		http.Redirect(w, r, redirectTo, http.StatusFound)
 	case "/oauth/token":
 		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
@@ -1275,7 +1279,6 @@ func newRequest(t *testing.T, ctx context.Context, method string, endpoint strin
 func mustDoRequest(t *testing.T, client *http.Client, req *http.Request) *http.Response {
 	t.Helper()
 
-	//nolint:gosec // Test helper only issues requests to in-process httptest servers and controlled local providers.
 	resp, err := client.Do(req)
 	if err != nil {
 		t.Fatalf("client.Do() error = %v", err)

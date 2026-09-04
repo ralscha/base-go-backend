@@ -62,8 +62,60 @@ func (s *Service) FinishPasskeyRegistration(ctx context.Context, userID int64, s
 	return s.persistPasskeyCredential(ctx, userID, credential, strings.TrimSpace(name))
 }
 
+func (s *Service) ListPasskeys(ctx context.Context, userID int64) ([]Passkey, error) {
+	if userID == 0 {
+		return nil, ErrUnauthorized
+	}
+	user, err := s.queries.GetUserByID(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateUserAccount(user); err != nil {
+		return nil, err
+	}
+
+	rows, err := s.queries.ListPasskeyCredentialsByUserID(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	passkeys := make([]Passkey, 0, len(rows))
+	for _, row := range rows {
+		name := "Passkey"
+		if row.Name.Valid && strings.TrimSpace(row.Name.String) != "" {
+			name = row.Name.String
+		}
+		passkeys = append(passkeys, Passkey{
+			ID: row.ID, Name: name, Transports: append([]string(nil), row.Transports...),
+			CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt,
+		})
+	}
+	return passkeys, nil
+}
+
+func (s *Service) DeletePasskey(ctx context.Context, userID, passkeyID int64) error {
+	if userID == 0 {
+		return ErrUnauthorized
+	}
+	user, err := s.queries.GetUserByID(ctx, userID)
+	if err != nil {
+		return err
+	}
+	if err := validateUserAccount(user); err != nil {
+		return err
+	}
+
+	deleted, err := s.queries.DeletePasskeyCredential(ctx, sqlc.DeletePasskeyCredentialParams{ID: passkeyID, UserID: userID})
+	if err != nil {
+		return err
+	}
+	if deleted == 0 {
+		return ErrPasskeyNotFound
+	}
+	return nil
+}
+
 func (s *Service) BeginPasskeyLogin() (*protocol.CredentialAssertion, []byte, error) {
-	options, session, err := s.webAuthn.BeginDiscoverableLogin(wa.WithUserVerification(protocol.VerificationPreferred))
+	options, session, err := s.webAuthn.BeginDiscoverableLogin(wa.WithUserVerification(protocol.VerificationRequired))
 	if err != nil {
 		return nil, nil, err
 	}
@@ -94,9 +146,6 @@ func (s *Service) FinishPasskeyLogin(ctx context.Context, sessionJSON, credentia
 		return SessionPrincipal{}, errors.New("unexpected passkey user type")
 	}
 
-	if err := s.queries.UpdateUserLastLogin(ctx, user.user.ID); err != nil {
-		return SessionPrincipal{}, err
-	}
 	if err := s.updatePasskeyCredential(ctx, validatedCredential); err != nil {
 		return SessionPrincipal{}, err
 	}

@@ -22,7 +22,7 @@ A production-ready Go backend template with authentication, authorization, OAuth
 
 ### Prerequisites
 
-- Go 1.26+
+- Go 1.27.1+
 - Docker (for PostgreSQL, Inbucket, sqlc codegen, and tests)
 - [Task](https://taskfile.dev/) (optional, for convenience commands)
 
@@ -118,6 +118,7 @@ See `config/config.yaml` for all options. See [GOING_PROD.md](GOING_PROD.md) for
 | `POST` | `/api/v1/auth/register` | Register a new user |
 | `POST` | `/api/v1/auth/login` | Login with email/password (+ optional TOTP) |
 | `GET` | `/api/v1/auth/verify-email` | Verify email with token |
+| `POST` | `/api/v1/auth/verify-email/request` | Request a replacement verification email |
 | `POST` | `/api/v1/auth/password-reset/request` | Request password reset email |
 | `POST` | `/api/v1/auth/password-reset/confirm` | Confirm password reset |
 | `POST` | `/api/v1/auth/account-recovery/request` | Request account recovery |
@@ -134,6 +135,8 @@ See `config/config.yaml` for all options. See [GOING_PROD.md](GOING_PROD.md) for
 | `GET` | `/api/v1/auth/me` | Get current user |
 | `POST` | `/api/v1/auth/passkeys/register/start` | Begin passkey registration |
 | `POST` | `/api/v1/auth/passkeys/register/finish` | Complete passkey registration |
+| `GET` | `/api/v1/auth/passkeys` | List registered passkeys |
+| `DELETE` | `/api/v1/auth/passkeys/{passkeyID}` | Delete a registered passkey |
 | `POST` | `/api/v1/auth/totp/setup` | Generate TOTP secret |
 | `POST` | `/api/v1/auth/totp/enable` | Enable TOTP |
 | `POST` | `/api/v1/auth/totp/disable` | Disable TOTP |
@@ -155,7 +158,7 @@ See `config/config.yaml` for all options. See [GOING_PROD.md](GOING_PROD.md) for
 
 | Library | Version | Purpose |
 |---|---|---|
-| [github.com/go-chi/chi/v5](https://github.com/go-chi/chi) | v5.3.0 | HTTP router with middleware support |
+| [github.com/go-chi/chi/v5](https://github.com/go-chi/chi) | v5.3.2 | HTTP router with middleware support |
 | [github.com/jackc/pgx/v5](https://github.com/jackc/pgx) | v5.10.0 | PostgreSQL driver and connection pool |
 | [github.com/alexedwards/scs/v2](https://github.com/alexedwards/scs) | v2.9.0 | HTTP session management |
 | [github.com/alexedwards/scs/pgxstore](https://github.com/alexedwards/scs) | v0.0.0-20251002162104-209de6e426de | PostgreSQL session store for SCS |
@@ -167,7 +170,7 @@ See `config/config.yaml` for all options. See [GOING_PROD.md](GOING_PROD.md) for
 |---|---|---|
 | [github.com/alexedwards/argon2id](https://github.com/alexedwards/argon2id) | v1.0.0 | Argon2id password hashing |
 | [github.com/pquerna/otp](https://github.com/pquerna/otp) | v1.5.0 | TOTP (two-factor) generation and validation |
-| [github.com/go-webauthn/webauthn](https://github.com/go-webauthn/webauthn) | v0.17.4 | WebAuthn / Passkey authentication |
+| [github.com/go-webauthn/webauthn](https://github.com/go-webauthn/webauthn) | v0.18.0 | WebAuthn / Passkey authentication |
 | [github.com/golang-jwt/jwt/v5](https://github.com/golang-jwt/jwt) | v5.3.1 | JWT parsing (indirect, via WebAuthn) |
 | [github.com/google/uuid](https://github.com/google/uuid) | v1.6.0 | UUID generation (passkey AAGUID) |
 
@@ -175,33 +178,33 @@ See `config/config.yaml` for all options. See [GOING_PROD.md](GOING_PROD.md) for
 
 | Library | Version | Purpose |
 |---|---|---|
-| [github.com/riverqueue/river](https://github.com/riverqueue/river) | v0.39.0 | PostgreSQL-backed job queue (email outbox, cleanup, inactivity checks) |
+| [github.com/riverqueue/river](https://github.com/riverqueue/river) | v0.47.0 | PostgreSQL-backed job queue (email outbox, cleanup, inactivity checks) |
 
 ### Database & Migrations
 
 | Library | Version | Purpose |
 |---|---|---|
-| [github.com/pressly/goose/v3](https://github.com/pressly/goose) | v3.27.1 | Database schema migrations |
+| [github.com/pressly/goose/v3](https://github.com/pressly/goose) | v3.28.0 | Database schema migrations |
 | [github.com/lib/pq](https://github.com/lib/pq) | v1.12.3 | PostgreSQL driver (used by test utilities) |
 
 ### Rate Limiting
 
 | Library | Version | Purpose |
 |---|---|---|
-| [github.com/ralscha/ratelimiter-pg](https://github.com/ralscha/ratelimiter-pg) | v0.0.0-20260531135312-9a7504910818 | PostgreSQL-backed token bucket rate limiter |
+| [github.com/ralscha/ratelimiter-pg](https://github.com/ralscha/ratelimiter-pg) | v0.0.0-20260824033116-a0fe65928120 | PostgreSQL-backed token bucket rate limiter |
 
 ### Testing
 
 | Library | Version | Purpose |
 |---|---|---|
-| [github.com/testcontainers/testcontainers-go](https://github.com/testcontainers/testcontainers-go) | v0.42.0 | Docker-based integration testing with real PostgreSQL |
-| [github.com/stretchr/testify](https://github.com/stretchr/testify) | v1.11.1 | Test assertions (indirect) |
+| [github.com/testcontainers/testcontainers-go](https://github.com/testcontainers/testcontainers-go) | v0.44.0 | Docker-based integration testing with real PostgreSQL |
+| [github.com/stretchr/testify](https://github.com/stretchr/testify) | v1.12.1 | Test assertions (indirect) |
 
 ### Development Tools
 
 | Tool | Purpose |
 |---|---|
-| [sqlc](https://sqlc.dev/) (v1.30.0) | Type-safe SQL code generation (run via Docker) |
+| [sqlc](https://sqlc.dev/) (v1.31.1) | Type-safe SQL code generation (run via Docker) |
 | [golangci-lint](https://golangci-lint.run/) (v2.13.1) | Go linter (run via Docker) |
 | [Docker Compose](https://docs.docker.com/compose/) | Local PostgreSQL + Inbucket for development |
 | [Task](https://taskfile.dev/) | Build/test automation |
@@ -215,6 +218,8 @@ task db:build-sqlc    # Build the sqlc Docker image
 task db:run-sqlc      # Generate Go code from SQL queries
 ```
 
+Generated files in `internal/store/sqlc/` are committed so a fresh checkout builds without Docker. Regenerate and commit them whenever the schema or queries change.
+
 ## Architecture Notes
 
 - **Dual DB handles**: The app maintains both a `database/sql` handle (`*sql.DB`) and a `pgxpool` handle (`*pgxpool.Pool`). The `sql.DB` is used for sqlc-generated queries and migrations; `pgxpool` is used by River, SCS sessions, and the rate limiter.
@@ -222,6 +227,8 @@ task db:run-sqlc      # Generate Go code from SQL queries
 - **Proxy trust boundary**: Forwarded client IP headers are only honored when the immediate peer matches `http.trusted_proxies`. Leave that list empty unless the app is behind a proxy you control.
 - **Encryption at rest**: TOTP secrets and OAuth tokens stored in the database are encrypted with AES-256-GCM using the configured `security.encryption_key`.
 - **Credential masking**: Login failures intentionally return a generic "Invalid email or password" message regardless of whether the email exists, the account is locked, disabled, or unverified.
+- **Session revocation**: Password reset and account recovery increment the user's authentication version, invalidating all previously issued sessions.
+- **OAuth email trust**: OAuth login and account linking require the provider to assert that the returned email address is verified.
 - **Test isolation**: Each test gets its own PostgreSQL database created from a shared Testcontainers container, ensuring full isolation without per-test container overhead.
 
 ## License

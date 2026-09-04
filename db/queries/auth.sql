@@ -26,6 +26,23 @@ WHERE token_hash = $1
   AND used_at IS NULL
   AND expires_at > NOW();
 
+-- name: ConsumeUserToken :one
+UPDATE user_tokens
+SET used_at = NOW()
+WHERE token_hash = $1
+  AND kind = $2
+  AND used_at IS NULL
+  AND expires_at > NOW()
+RETURNING *;
+
+-- name: ExpireUserTokens :exec
+UPDATE user_tokens
+SET expires_at = NOW()
+WHERE user_id = $1
+  AND kind = $2
+  AND used_at IS NULL
+  AND expires_at > NOW();
+
 -- name: UseUserToken :exec
 UPDATE user_tokens
 SET used_at = NOW()

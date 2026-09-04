@@ -143,12 +143,86 @@ func TestVerifyEmailMarksUserVerifiedAndConsumesToken(t *testing.T) {
 	}
 }
 
+func TestVerifyEmailTokenCanOnlyBeConsumedOnceConcurrently(t *testing.T) {
+	ctx := context.Background()
+	_, queries, service := newAuthRuntimeTestEnv(t, ctx)
+	user := createAuthTestUser(t, ctx, queries, "verify-once", "verify-once@example.com")
+	plainToken, tokenHash, err := NewToken()
+	if err != nil {
+		t.Fatalf("NewToken() error = %v", err)
+	}
+	if _, err := queries.CreateUserToken(ctx, sqlc.CreateUserTokenParams{
+		UserID: user.ID, Kind: sqlc.TokenKindEmailVerification, TokenHash: tokenHash,
+		ExpiresAt: time.Now().UTC().Add(time.Hour),
+	}); err != nil {
+		t.Fatalf("CreateUserToken() error = %v", err)
+	}
+
+	results := make(chan error, 2)
+	for range 2 {
+		go func() { results <- service.VerifyEmail(ctx, plainToken) }()
+	}
+	var successes, rejected int
+	for range 2 {
+		err := <-results
+		switch {
+		case err == nil:
+			successes++
+		case errors.Is(err, ErrRequestFailed):
+			rejected++
+		default:
+			t.Fatalf("VerifyEmail() error = %v", err)
+		}
+	}
+	if successes != 1 || rejected != 1 {
+		t.Fatalf("results = %d success/%d rejected, want 1/1", successes, rejected)
+	}
+}
+
+func TestRequestEmailVerificationReplacesPreviousToken(t *testing.T) {
+	ctx := context.Background()
+	_, queries, service := newAuthRuntimeTestEnv(t, ctx)
+	user := createAuthTestUser(t, ctx, queries, "resend-verification", "resend@example.com")
+
+	if err := service.RequestEmailVerification(ctx, user.Email); err != nil {
+		t.Fatalf("first RequestEmailVerification() error = %v", err)
+	}
+	if err := service.RequestEmailVerification(ctx, user.Email); err != nil {
+		t.Fatalf("second RequestEmailVerification() error = %v", err)
+	}
+	emails, err := queries.ListPendingEmails(ctx, 10)
+	if err != nil {
+		t.Fatalf("ListPendingEmails() error = %v", err)
+	}
+	if len(emails) != 2 {
+		t.Fatalf("pending emails = %d, want 2", len(emails))
+	}
+	var first, second struct {
+		Token string `json:"token"`
+	}
+	if err := json.Unmarshal(emails[0].Payload, &first); err != nil {
+		t.Fatalf("decode first email: %v", err)
+	}
+	if err := json.Unmarshal(emails[1].Payload, &second); err != nil {
+		t.Fatalf("decode second email: %v", err)
+	}
+	if !errors.Is(service.VerifyEmail(ctx, first.Token), ErrRequestFailed) {
+		t.Fatal("first verification token remained valid after resend")
+	}
+	if err := service.VerifyEmail(ctx, second.Token); err != nil {
+		t.Fatalf("VerifyEmail(second token) error = %v", err)
+	}
+}
+
 func TestRequestPasswordResetAndResetPassword(t *testing.T) {
 	ctx := context.Background()
 	db, queries := newAuthTestDB(t, ctx)
 	service := newAuthTestService(db, queries)
 
 	user := createAuthTestUser(t, ctx, queries, "reset-user", "reset@example.com")
+	if err := queries.MarkUserEmailVerified(ctx, user.ID); err != nil {
+		t.Fatalf("MarkUserEmailVerified() error = %v", err)
+	}
 	passwordHash, err := HashPassword("InitialPassword123")
 	if err != nil {
 		t.Fatalf("HashPassword() error = %v", err)
@@ -194,6 +268,15 @@ func TestRequestPasswordResetAndResetPassword(t *testing.T) {
 	}
 	if !match {
 		t.Fatal("expected updated password hash to match")
+	}
+	if credential.AuthVersion != user.AuthVersion+1 {
+		t.Fatalf("auth_version = %d, want %d", credential.AuthVersion, user.AuthVersion+1)
+	}
+	if valid, err := service.ValidateSession(ctx, user.ID, user.AuthVersion); err != nil || valid {
+		t.Fatalf("ValidateSession(old version) = %v, %v; want false, nil", valid, err)
+	}
+	if valid, err := service.ValidateSession(ctx, user.ID, credential.AuthVersion); err != nil || !valid {
+		t.Fatalf("ValidateSession(current version) = %v, %v; want true, nil", valid, err)
 	}
 
 	if _, err := queries.GetUserToken(ctx, sqlc.GetUserTokenParams{TokenHash: HashToken(payload.Token), Kind: sqlc.TokenKindPasswordReset}); !errors.Is(err, sql.ErrNoRows) {
@@ -248,6 +331,9 @@ func TestTOTPFlowAndLoginWithCode(t *testing.T) {
 	}
 	if !configRow.EnabledAt.Valid {
 		t.Fatal("expected TOTP config to be enabled after confirmation")
+	}
+	if _, err := service.BeginTOTPSetup(ctx, user.ID); !errors.Is(err, ErrTOTPAlreadyEnabled) {
+		t.Fatalf("BeginTOTPSetup(enabled) error = %v, want %v", err, ErrTOTPAlreadyEnabled)
 	}
 	_, err = service.LoginWithPassword(ctx, LoginInput{Email: user.Email, Password: "ValidPassword123", IPAddress: "127.0.0.1"})
 	if !errors.Is(err, ErrTOTPRequired) {
@@ -364,6 +450,29 @@ func TestLoginWithPasswordEdgeCases(t *testing.T) {
 		}
 		if updatedUser.FailedLoginCount != 1 {
 			t.Fatalf("FailedLoginCount = %d, want 1", updatedUser.FailedLoginCount)
+		}
+		if !updatedUser.LastFailedLoginAt.Valid {
+			t.Fatal("LastFailedLoginAt is empty after failed login")
+		}
+
+		if _, err := db.ExecContext(ctx, `
+			UPDATE users
+			SET failed_login_count = 4,
+			    last_failed_login_at = NOW() - INTERVAL '16 minutes'
+			WHERE id = $1
+		`, user.ID); err != nil {
+			t.Fatalf("seed stale failed login window: %v", err)
+		}
+		_, err = service.LoginWithPassword(ctx, LoginInput{Email: user.Email, Password: "WrongPassword123", IPAddress: "127.0.0.1"})
+		if !errors.Is(err, ErrInvalidCredentials) {
+			t.Fatalf("LoginWithPassword(stale window) error = %v, want %v", err, ErrInvalidCredentials)
+		}
+		updatedUser, err = queries.GetUserByID(ctx, user.ID)
+		if err != nil {
+			t.Fatalf("GetUserByID() after stale window error = %v", err)
+		}
+		if updatedUser.FailedLoginCount != 1 {
+			t.Fatalf("FailedLoginCount after stale window = %d, want 1", updatedUser.FailedLoginCount)
 		}
 	})
 
@@ -565,6 +674,9 @@ func TestPasskeyCredentialPersistenceAndLookup(t *testing.T) {
 	service := &Service{queries: queries}
 
 	user := createAuthTestUser(t, ctx, queries, "passkey-store", "passkey-store@example.com")
+	if err := queries.MarkUserEmailVerified(ctx, user.ID); err != nil {
+		t.Fatalf("MarkUserEmailVerified() error = %v", err)
+	}
 	aaguid := uuid.MustParse("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
 	credential := &wa.Credential{
 		ID:              []byte("credential-1"),
@@ -652,6 +764,20 @@ func TestPasskeyCredentialPersistenceAndLookup(t *testing.T) {
 	}
 	if !bytes.Equal(rows[0].CredentialPublicKey, updated.PublicKey) || rows[0].AttestationType != "basic" || rows[0].SignCount != 11 || rows[0].CloneWarning {
 		t.Fatalf("updated row = %+v, want updated passkey fields", rows[0])
+	}
+
+	passkeys, err := service.ListPasskeys(ctx, user.ID)
+	if err != nil {
+		t.Fatalf("ListPasskeys() error = %v", err)
+	}
+	if len(passkeys) != 1 || passkeys[0].ID != rows[0].ID || passkeys[0].Name != "Passkey" {
+		t.Fatalf("ListPasskeys() = %+v, want safe credential metadata", passkeys)
+	}
+	if err := service.DeletePasskey(ctx, user.ID, rows[0].ID); err != nil {
+		t.Fatalf("DeletePasskey() error = %v", err)
+	}
+	if err := service.DeletePasskey(ctx, user.ID, rows[0].ID); !errors.Is(err, ErrPasskeyNotFound) {
+		t.Fatalf("DeletePasskey(missing) error = %v, want %v", err, ErrPasskeyNotFound)
 	}
 }
 
@@ -745,6 +871,36 @@ func TestCompleteOAuthAuthenticationCreatesUserAndStoresAccount(t *testing.T) {
 		t.Fatalf("oauth account = %+v, want stored tokens for created user", account)
 	}
 	assertQueryCount(t, ctx, db, `SELECT COUNT(*) FROM users WHERE email = 'oauth-create@example.com'`, 1)
+}
+
+func TestCompleteOAuthAuthenticationRejectsUnverifiedProviderEmail(t *testing.T) {
+	ctx := context.Background()
+	db, queries := newAuthTestDB(t, ctx)
+	client := &fakeOAuthClient{
+		tokens:  OAuthTokens{AccessToken: "access-token"},
+		profile: OAuthProfile{Subject: "unverified-provider-user", Email: "victim@example.com", EmailVerified: false},
+	}
+	service := newAuthTestService(db, queries)
+	service.cfg.OAuth = config.OAuthConfig{StateTTL: 10 * time.Minute}
+	service.oauth = map[string]OAuthProviderClient{"test": client}
+
+	existing := createAuthTestUser(t, ctx, queries, "oauth-victim", "victim@example.com")
+	addRoleToUser(t, ctx, queries, existing.ID)
+	if err := queries.MarkUserEmailVerified(ctx, existing.ID); err != nil {
+		t.Fatalf("MarkUserEmailVerified() error = %v", err)
+	}
+	sessionJSON, err := encodeOAuthFlow(oauthFlowState{
+		Provider: "test", State: "oauth-state", CodeVerifier: "oauth-verifier", StartedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("encodeOAuthFlow() error = %v", err)
+	}
+
+	_, err = service.CompleteOAuthAuthentication(ctx, "test", sessionJSON, "oauth-state", "oauth-code", 0)
+	if !errors.Is(err, ErrOAuthProfile) {
+		t.Fatalf("CompleteOAuthAuthentication() error = %v, want %v", err, ErrOAuthProfile)
+	}
+	assertQueryCount(t, ctx, db, `SELECT COUNT(*) FROM oauth_accounts`, 0)
 }
 
 func TestCompleteOAuthAuthenticationLinksExistingUserByEmail(t *testing.T) {

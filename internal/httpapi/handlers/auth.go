@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"base/internal/auth"
@@ -13,7 +15,6 @@ import (
 
 	"github.com/alexedwards/scs/v2"
 	"github.com/go-chi/chi/v5"
-	ratelimit "github.com/ralscha/ratelimiter-pg"
 )
 
 const (
@@ -24,10 +25,8 @@ const (
 )
 
 type AuthHandler struct {
-	Service          *auth.Service
-	Sessions         *scs.SessionManager
-	Secure           bool
-	LoginRateLimiter *ratelimit.RateLimiter
+	Service  *auth.Service
+	Sessions *scs.SessionManager
 }
 
 func (h AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
@@ -53,18 +52,6 @@ func (h AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
-	ip := clientIP(r)
-	decision, err := h.LoginRateLimiter.Allow(r.Context(), fmt.Sprintf("login:ip:%s", ip))
-	if err != nil {
-		jsonio.WriteError(w, http.StatusInternalServerError, "rate_limit_error", "rate limiter unavailable")
-		return
-	}
-	if !decision.Allowed {
-		w.Header().Set("Retry-After", fmt.Sprintf("%.0f", decision.RetryAfter.Seconds()))
-		jsonio.WriteError(w, http.StatusTooManyRequests, "too_many_requests", "too many login attempts; try again later")
-		return
-	}
-
 	var req loginRequest
 	if err := jsonio.DecodeAndValidate(w, r, &req); err != nil {
 		return
@@ -117,6 +104,28 @@ func (h AuthHandler) FinishPasskeyRegistration(w http.ResponseWriter, r *http.Re
 	jsonio.WriteJSON(w, http.StatusCreated, map[string]any{"registered": true})
 }
 
+func (h AuthHandler) ListPasskeys(w http.ResponseWriter, r *http.Request) {
+	passkeys, err := h.Service.ListPasskeys(r.Context(), h.Sessions.GetInt64(r.Context(), "user_id"))
+	if err != nil {
+		handleAuthError(w, err)
+		return
+	}
+	jsonio.WriteJSON(w, http.StatusOK, map[string]any{"passkeys": passkeys})
+}
+
+func (h AuthHandler) DeletePasskey(w http.ResponseWriter, r *http.Request) {
+	passkeyID, err := strconv.ParseInt(strings.TrimSpace(chi.URLParam(r, "passkeyID")), 10, 64)
+	if err != nil || passkeyID <= 0 {
+		jsonio.WriteError(w, http.StatusBadRequest, "invalid_passkey_id", "passkey id must be a positive integer")
+		return
+	}
+	if err := h.Service.DeletePasskey(r.Context(), h.Sessions.GetInt64(r.Context(), "user_id"), passkeyID); err != nil {
+		handleAuthError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func (h AuthHandler) BeginPasskeyLogin(w http.ResponseWriter, r *http.Request) {
 	options, sessionJSON, err := h.Service.BeginPasskeyLogin()
 	if err != nil {
@@ -130,7 +139,12 @@ func (h AuthHandler) BeginPasskeyLogin(w http.ResponseWriter, r *http.Request) {
 
 func (h AuthHandler) StartOAuth(w http.ResponseWriter, r *http.Request) {
 	provider := strings.ToLower(strings.TrimSpace(chi.URLParam(r, "provider")))
-	authorizationURL, sessionJSON, mode, err := h.Service.OAuthAuthorizationURL(r.Context(), provider, h.Sessions.GetInt64(r.Context(), "user_id"))
+	userID, err := h.validatedOptionalUserID(r.Context())
+	if err != nil {
+		handleAuthError(w, err)
+		return
+	}
+	authorizationURL, sessionJSON, mode, err := h.Service.OAuthAuthorizationURL(r.Context(), provider, userID)
 	if err != nil {
 		handleAuthError(w, err)
 		return
@@ -147,6 +161,11 @@ func (h AuthHandler) StartOAuth(w http.ResponseWriter, r *http.Request) {
 func (h AuthHandler) CompleteOAuth(w http.ResponseWriter, r *http.Request) {
 	sessionJSON := []byte(h.Sessions.GetString(r.Context(), oauthSessionKey))
 	h.Sessions.Remove(r.Context(), oauthSessionKey)
+	userID, err := h.validatedOptionalUserID(r.Context())
+	if err != nil {
+		handleAuthError(w, err)
+		return
+	}
 
 	result, err := h.Service.CompleteOAuthAuthentication(
 		r.Context(),
@@ -154,7 +173,7 @@ func (h AuthHandler) CompleteOAuth(w http.ResponseWriter, r *http.Request) {
 		sessionJSON,
 		strings.TrimSpace(r.URL.Query().Get("state")),
 		strings.TrimSpace(r.URL.Query().Get("code")),
-		h.Sessions.GetInt64(r.Context(), "user_id"),
+		userID,
 	)
 	if err != nil {
 		handleAuthError(w, err)
@@ -227,6 +246,19 @@ func (h AuthHandler) RequestPasswordReset(w http.ResponseWriter, r *http.Request
 	}
 
 	if err := h.Service.RequestPasswordReset(r.Context(), req.Email); err != nil {
+		handleAuthError(w, err)
+		return
+	}
+	jsonio.WriteJSON(w, http.StatusAccepted, map[string]any{"requested": true})
+}
+
+func (h AuthHandler) RequestEmailVerification(w http.ResponseWriter, r *http.Request) {
+	var req emailRequest
+	if err := jsonio.DecodeAndValidate(w, r, &req); err != nil {
+		return
+	}
+
+	if err := h.Service.RequestEmailVerification(r.Context(), req.Email); err != nil {
 		handleAuthError(w, err)
 		return
 	}
@@ -330,8 +362,12 @@ func handleAuthError(w http.ResponseWriter, err error) {
 		jsonio.WriteError(w, http.StatusUnauthorized, "totp_required", err.Error())
 	case errors.Is(err, auth.ErrInvalidTOTP):
 		jsonio.WriteError(w, http.StatusUnauthorized, "invalid_totp", err.Error())
+	case errors.Is(err, auth.ErrTOTPAlreadyEnabled):
+		jsonio.WriteError(w, http.StatusConflict, "totp_already_enabled", err.Error())
 	case errors.Is(err, auth.ErrPasskeyCeremony):
 		jsonio.WriteError(w, http.StatusBadRequest, "passkey_ceremony_missing", err.Error())
+	case errors.Is(err, auth.ErrPasskeyNotFound):
+		jsonio.WriteError(w, http.StatusNotFound, "passkey_not_found", err.Error())
 	case errors.Is(err, auth.ErrOAuthProvider):
 		jsonio.WriteError(w, http.StatusBadRequest, "oauth_provider_invalid", err.Error())
 	case errors.Is(err, auth.ErrOAuthState):
@@ -350,6 +386,13 @@ func handleAuthError(w http.ResponseWriter, err error) {
 }
 
 func handlePasswordLoginError(w http.ResponseWriter, err error) {
+	var rateLimitErr *auth.RateLimitError
+	if errors.As(err, &rateLimitErr) {
+		retryAfter := max(int64(1), int64(math.Ceil(rateLimitErr.RetryAfter.Seconds())))
+		w.Header().Set("Retry-After", fmt.Sprintf("%d", retryAfter))
+		jsonio.WriteError(w, http.StatusTooManyRequests, "too_many_requests", "too many login attempts; try again later")
+		return
+	}
 	switch {
 	case errors.Is(err, auth.ErrInvalidCredentials),
 		errors.Is(err, auth.ErrAccountLocked),
@@ -367,8 +410,27 @@ func (h AuthHandler) completeLogin(ctx context.Context, principal auth.SessionPr
 	}
 
 	h.Sessions.Put(ctx, "user_id", principal.UserID)
+	h.Sessions.Put(ctx, "auth_version", principal.AuthVersion)
 
 	return nil
+}
+
+func (h AuthHandler) validatedOptionalUserID(ctx context.Context) (int64, error) {
+	userID := h.Sessions.GetInt64(ctx, "user_id")
+	if userID == 0 {
+		return 0, nil
+	}
+	valid, err := h.Service.ValidateSession(ctx, userID, h.Sessions.GetInt64(ctx, "auth_version"))
+	if err != nil {
+		return 0, err
+	}
+	if !valid {
+		if err := h.Sessions.Destroy(ctx); err != nil {
+			return 0, err
+		}
+		return 0, auth.ErrUnauthorized
+	}
+	return userID, nil
 }
 
 func clientIP(r *http.Request) string {

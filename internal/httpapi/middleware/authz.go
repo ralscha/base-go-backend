@@ -13,6 +13,7 @@ import (
 )
 
 type RoleResolver func(ctx context.Context, userID int64) ([]string, error)
+type SessionValidator func(ctx context.Context, userID, authVersion int64) (bool, error)
 
 type apiError struct {
 	Error struct {
@@ -21,12 +22,28 @@ type apiError struct {
 	} `json:"error"`
 }
 
-func RequireAuthenticated(sessions *scs.SessionManager) func(http.Handler) http.Handler {
+func RequireAuthenticated(sessions *scs.SessionManager, validators ...SessionValidator) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if sessions.GetInt64(r.Context(), "user_id") == 0 {
+			userID := sessions.GetInt64(r.Context(), "user_id")
+			if userID == 0 {
 				writeAuthzError(w, http.StatusUnauthorized, "unauthorized", "authentication required")
 				return
+			}
+			for _, validate := range validators {
+				valid, err := validate(r.Context(), userID, sessions.GetInt64(r.Context(), "auth_version"))
+				if err != nil {
+					writeAuthzError(w, http.StatusInternalServerError, "internal_error", "an unexpected error occurred")
+					return
+				}
+				if !valid {
+					if err := sessions.Destroy(r.Context()); err != nil {
+						writeAuthzError(w, http.StatusInternalServerError, "session_error", "could not destroy invalid session")
+						return
+					}
+					writeAuthzError(w, http.StatusUnauthorized, "unauthorized", "authentication required")
+					return
+				}
 			}
 			next.ServeHTTP(w, r)
 		})

@@ -165,6 +165,28 @@ func TestConfiguredOAuthProviderFetchProfile(t *testing.T) {
 			t.Fatal("FetchProfile() error = nil, want decode error")
 		}
 	})
+
+	t.Run("missing email verification claim fails closed", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte(`{"sub":"user-1","email":"user@example.com"}`))
+		}))
+		defer server.Close()
+
+		provider := configuredOAuthProvider{
+			config: config.OAuthProviderConfig{
+				UserInfoURL: server.URL, SubjectField: "sub", EmailField: "email",
+				EmailVerifiedField: "email_verified",
+			},
+			httpClient: server.Client(),
+		}
+		profile, err := provider.FetchProfile(context.Background(), "access-token")
+		if err != nil {
+			t.Fatalf("FetchProfile() error = %v", err)
+		}
+		if profile.EmailVerified {
+			t.Fatal("EmailVerified = true, want false for a missing claim")
+		}
+	})
 }
 
 func ioReadAllAndClose(r *http.Request) ([]byte, error) {

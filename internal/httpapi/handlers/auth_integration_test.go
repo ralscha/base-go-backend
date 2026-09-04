@@ -276,7 +276,7 @@ func TestRegisterAndLoginFlow(t *testing.T) {
 	_, queries, service := newHandlerAuthTestEnv(t, ctx)
 
 	sessions := scs.New()
-	handler := AuthHandler{Service: service, Sessions: sessions, LoginRateLimiter: service.RateLimiter()}
+	handler := AuthHandler{Service: service, Sessions: sessions}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/register", handler.Register)
 	mux.HandleFunc("/login", handler.Login)
@@ -401,7 +401,7 @@ func TestLoginReturnsTOTPRequired(t *testing.T) {
 	}
 
 	sessions := scs.New()
-	handler := AuthHandler{Service: service, Sessions: sessions, LoginRateLimiter: service.RateLimiter()}
+	handler := AuthHandler{Service: service, Sessions: sessions}
 	recorder := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(fmt.Sprintf(`{"email":"login-totp@example.com","password":"%s"}`, handlerTestValidPassword)))
 	handler.Login(recorder, req)
@@ -479,7 +479,7 @@ func TestLoginMasksCredentialAndAccountStateFailures(t *testing.T) {
 			email, password := testCase.setup(t, ctx, db, queries)
 
 			sessions := scs.New()
-			handler := AuthHandler{Service: service, Sessions: sessions, LoginRateLimiter: service.RateLimiter()}
+			handler := AuthHandler{Service: service, Sessions: sessions}
 			server := httptest.NewServer(sessions.LoadAndSave(http.HandlerFunc(handler.Login)))
 			defer server.Close()
 

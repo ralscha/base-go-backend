@@ -2,6 +2,8 @@ package jsonio
 
 import (
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 )
 
@@ -17,6 +19,13 @@ func DecodeJSON(w http.ResponseWriter, r *http.Request, dst any) error {
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(dst); err != nil {
 		WriteError(w, http.StatusBadRequest, "invalid_json", "invalid JSON body")
+		return err
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		WriteError(w, http.StatusBadRequest, "invalid_json", "invalid JSON body")
+		if err == nil {
+			return errors.New("request body must contain a single JSON value")
+		}
 		return err
 	}
 	return nil
