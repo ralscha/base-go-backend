@@ -386,8 +386,7 @@ func handleAuthError(w http.ResponseWriter, err error) {
 }
 
 func handlePasswordLoginError(w http.ResponseWriter, err error) {
-	var rateLimitErr *auth.RateLimitError
-	if errors.As(err, &rateLimitErr) {
+	if rateLimitErr, ok := errors.AsType[*auth.RateLimitError](err); ok {
 		retryAfter := max(int64(1), int64(math.Ceil(rateLimitErr.RetryAfter.Seconds())))
 		w.Header().Set("Retry-After", fmt.Sprintf("%d", retryAfter))
 		jsonio.WriteError(w, http.StatusTooManyRequests, "too_many_requests", "too many login attempts; try again later")
