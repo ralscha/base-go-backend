@@ -484,7 +484,7 @@ func TestPasswordLoginPersistsSessionForAuthenticatedRoutes(t *testing.T) {
 func TestAdminAccessReflectsRoleChangesAfterAuthorizationCacheExpiry(t *testing.T) {
 	ctx := context.Background()
 	env := newIntegrationEnvWithConfig(t, ctx, func(cfg *config.Config) {
-		cfg.Security.AuthorizationCacheTTL = 25 * time.Millisecond
+		cfg.Security.AuthorizationCacheTTL = time.Hour
 	})
 
 	user, err := env.queries.CreateUser(ctx, sqlc.CreateUserParams{Username: "admin-cache-user", Email: "admin-cache@example.com"})
@@ -551,7 +551,8 @@ func TestAdminAccessReflectsRoleChangesAfterAuthorizationCacheExpiry(t *testing.
 		t.Fatalf("immediate admin access status = %d, want %d, body = %s", immediateAccessResp.StatusCode, http.StatusForbidden, strings.TrimSpace(string(body)))
 	}
 
-	time.Sleep(50 * time.Millisecond)
+	// Expire this entry deterministically without relying on database/HTTP timing.
+	env.roleCache.Set(user.ID, []string{"user"}, time.Now().Add(-2*time.Hour))
 
 	refreshedAccessResp := mustDoRequest(t, client, newRequest(t, ctx, http.MethodGet, adminAccessURL, nil))
 	defer func() { _ = refreshedAccessResp.Body.Close() }()
@@ -961,6 +962,7 @@ func postJSON(t *testing.T, endpoint string, payload any) *http.Response {
 }
 
 type integrationEnv struct {
+	roleCache     *cache.Cache[int64, []string]
 	db            *sql.DB
 	pool          *pgxpool.Pool
 	server        *httptest.Server
@@ -1071,6 +1073,7 @@ func newIntegrationEnvWithConfig(t *testing.T, ctx context.Context, configure fu
 	t.Cleanup(server.Close)
 
 	return &integrationEnv{
+		roleCache:     roleCache,
 		db:            db,
 		pool:          pool,
 		server:        server,

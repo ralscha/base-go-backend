@@ -123,6 +123,9 @@ func TestMeReturnsCurrentUser(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateUser() error = %v", err)
 	}
+	if err := queries.MarkUserEmailVerified(ctx, user.ID); err != nil {
+		t.Fatal(err)
+	}
 	role, err := queries.GetRoleByName(ctx, "user")
 	if err != nil {
 		t.Fatalf("GetRoleByName() error = %v", err)

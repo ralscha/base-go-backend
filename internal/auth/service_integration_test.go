@@ -574,6 +574,9 @@ func TestCurrentUserReturnsRolesAndTOTPFlag(t *testing.T) {
 	service := &Service{queries: queries}
 
 	user := createAuthTestUser(t, ctx, queries, "current-user", "current@example.com")
+	if err := queries.MarkUserEmailVerified(ctx, user.ID); err != nil {
+		t.Fatal(err)
+	}
 	addRoleToUser(t, ctx, queries, user.ID)
 	if _, err := queries.UpsertTotpConfiguration(ctx, sqlc.UpsertTotpConfigurationParams{
 		UserID:           user.ID,
@@ -605,6 +608,9 @@ func TestCompleteUserAuthenticationUpdatesLastLogin(t *testing.T) {
 	service := &Service{queries: queries}
 
 	user := createAuthTestUser(t, ctx, queries, "complete-auth", "complete@example.com")
+	if err := queries.MarkUserEmailVerified(ctx, user.ID); err != nil {
+		t.Fatal(err)
+	}
 	addRoleToUser(t, ctx, queries, user.ID)
 
 	principal, err := service.completeUserAuthentication(ctx, queries, user.ID, true)
@@ -1082,6 +1088,9 @@ func newAuthRuntimeTestEnv(t *testing.T, ctx context.Context) (*sql.DB, *sqlc.Qu
 
 	service, err := NewService(ctx, db, pgx, config.Config{
 		Security: config.SecurityConfig{
+			EmailVerificationTTL: time.Hour,
+			PasswordResetTTL:     time.Hour,
+			RecoveryTTL:          time.Hour,
 			FailedLoginThreshold: 5,
 			FailedLoginWindow:    15 * time.Minute,
 			EncryptionKey:        "0123456789abcdef0123456789abcdef",
