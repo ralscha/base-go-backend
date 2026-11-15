@@ -18,7 +18,7 @@ require (
 	github.com/moby/moby/client v0.6.3
 	github.com/pquerna/otp v1.5.0
 	github.com/pressly/goose/v3 v3.30.1
-	github.com/ralscha/ratelimiter-pg v0.0.0-20261101133321-6733a340dd70
+	github.com/ralscha/ratelimiter-pg v0.0.0-20261114085652-615c96f6ca17
 	github.com/riverqueue/river v0.51.2
 	github.com/riverqueue/river/riverdriver/riverpgxv5 v0.51.2
 	github.com/riverqueue/river/rivertype v0.51.2
@@ -80,7 +80,7 @@ require (
 	github.com/sirupsen/logrus v1.10.2 // indirect
 	github.com/stretchr/testify v1.12.1 // indirect
 	github.com/testcontainers/testcontainers-go v0.45.0 // indirect
-	github.com/tidwall/gjson v1.20.2 // indirect
+	github.com/tidwall/gjson v1.20.3 // indirect
 	github.com/tidwall/match v1.2.0 // indirect
 	github.com/tidwall/pretty v1.3.0 // indirect
 	github.com/tidwall/sjson v1.2.9 // indirect
