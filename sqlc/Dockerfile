@@ -1,4 +1,4 @@
-FROM golang:1.27.3
+FROM golang:1.27.4
 
 RUN go install github.com/sqlc-dev/sqlc/cmd/sqlc@v1.31.1
 
